@@ -1,8 +1,13 @@
 import gradio as gr
 from easygui import msgbox
 import subprocess
-from .common_gui import get_folder_path
+from .common_gui import get_folder_path, add_pre_postfix
 import os
+
+from library.custom_logging import setup_logging
+
+# Set up logging
+log = setup_logging()
 
 
 def caption_images(
@@ -18,6 +23,8 @@ def caption_images(
     debug,
     undesired_tags,
     frequency_tags,
+    prefix,
+    postfix,
 ):
     # Check for images_dir_input
     if train_data_dir == '':
@@ -28,7 +35,7 @@ def caption_images(
         msgbox('Please provide an extension for the caption files.')
         return
 
-    print(f'Captioning files in {train_data_dir}...')
+    log.info(f'Captioning files in {train_data_dir}...')
     run_cmd = f'accelerate launch "./finetune/tag_images_by_wd14_tagger.py"'
     run_cmd += f' --batch_size={int(batch_size)}'
     run_cmd += f' --general_threshold={general_threshold}'
@@ -52,7 +59,7 @@ def caption_images(
         run_cmd += f' --undesired_tags="{undesired_tags}"'
     run_cmd += f' "{train_data_dir}"'
 
-    print(run_cmd)
+    log.info(run_cmd)
 
     # Run the command
     if os.name == 'posix':
@@ -60,7 +67,15 @@ def caption_images(
     else:
         subprocess.run(run_cmd)
 
-    print('...captioning done')
+    # Add prefix and postfix
+    add_pre_postfix(
+        folder=train_data_dir,
+        caption_file_ext=caption_extension,
+        prefix=prefix,
+        postfix=postfix,
+    )
+
+    log.info('...captioning done')
 
 
 ###
@@ -103,6 +118,19 @@ def gradio_wd14_caption_gui_tab(headless=False):
             placeholder='(Optional) Separate `undesired_tags` with comma `(,)` if you want to remove multiple tags, e.g. `1girl,solo,smile`.',
             interactive=True,
         )
+
+        with gr.Row():
+            prefix = gr.Textbox(
+                label='Prefix to add to WD14 caption',
+                placeholder='(Optional)',
+                interactive=True,
+            )
+
+            postfix = gr.Textbox(
+                label='Postfix to add to WD14 caption',
+                placeholder='(Optional)',
+                interactive=True,
+            )
 
         with gr.Row():
             replace_underscores = gr.Checkbox(
@@ -151,7 +179,7 @@ def gradio_wd14_caption_gui_tab(headless=False):
             character_threshold = gr.Slider(
                 value=0.35,
                 label='Character threshold',
-                info='useful if you want to train with characte',
+                info='useful if you want to train with character',
                 minimum=0,
                 maximum=1,
                 step=0.05,
@@ -184,6 +212,8 @@ def gradio_wd14_caption_gui_tab(headless=False):
                 debug,
                 undesired_tags,
                 frequency_tags,
+                prefix,
+                postfix,
             ],
             show_progress=False,
         )

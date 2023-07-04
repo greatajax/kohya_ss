@@ -8,6 +8,11 @@ from .common_gui import (
     get_file_path,
 )
 
+from library.custom_logging import setup_logging
+
+# Set up logging
+log = setup_logging()
+
 folder_symbol = '\U0001f4c2'  # 📂
 refresh_symbol = '\U0001f504'  # 🔄
 save_style_symbol = '\U0001f4be'  # 💾
@@ -57,7 +62,7 @@ def svd_merge_lora(
     run_cmd += f' --new_rank "{new_rank}"'
     run_cmd += f' --new_conv_rank "{new_conv_rank}"'
 
-    print(run_cmd)
+    log.info(run_cmd)
 
     # Run the command
     if os.name == 'posix':
@@ -73,7 +78,7 @@ def svd_merge_lora(
 
 def gradio_svd_merge_lora_tab(headless=False):
     with gr.Tab('Merge LoRA (SVD)'):
-        gr.Markdown('This utility can merge two LoRA networks together.')
+        gr.Markdown('This utility can merge two LoRA networks together into a new LoRA.')
 
         lora_ext = gr.Textbox(value='*.safetensors *.pt', visible=False)
         lora_ext_name = gr.Textbox(value='LoRA model types', visible=False)
@@ -141,7 +146,7 @@ def gradio_svd_merge_lora_tab(headless=False):
         with gr.Row():
             save_to = gr.Textbox(
                 label='Save to',
-                placeholder='path for the file to save...',
+                placeholder='path for the new LoRA file to save...',
                 interactive=True,
             )
             button_save_to = gr.Button(

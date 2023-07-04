@@ -28,6 +28,7 @@ from library.common_gui import (
     update_my_data,
     check_if_model_exist,
     output_message,
+    verify_image_folder_pattern,
 )
 from library.tensorboard_gui import (
     gradio_tensorboard,
@@ -39,6 +40,11 @@ from library.dreambooth_folder_creation_gui import (
 )
 from library.utilities import utilities_tab
 from library.sampler_gui import sample_gradio_config, run_cmd_sample
+
+from library.custom_logging import setup_logging
+
+# Set up logging
+log = setup_logging()
 
 # from easygui import msgbox
 
@@ -104,7 +110,9 @@ def save_configuration(
     caption_dropout_rate,
     optimizer,
     optimizer_args,
-    noise_offset_type,noise_offset,adaptive_noise_scale,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
     multires_noise_iterations,
     multires_noise_discount,
     sample_every_n_steps,
@@ -120,6 +128,7 @@ def save_configuration(
     save_last_n_steps_state,
     use_wandb,
     wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
@@ -129,14 +138,14 @@ def save_configuration(
     save_as_bool = True if save_as.get('label') == 'True' else False
 
     if save_as_bool:
-        print('Save as...')
+        log.info('Save as...')
         file_path = get_saveasfile_path(file_path)
     else:
-        print('Save...')
+        log.info('Save...')
         if file_path == None or file_path == '':
             file_path = get_saveasfile_path(file_path)
 
-    # print(file_path)
+    # log.info(file_path)
 
     if file_path == None or file_path == '':
         return original_file_path  # In case a file_path was provided and the user decide to cancel the open action
@@ -144,12 +153,8 @@ def save_configuration(
     # Return the values of the variables as a dictionary
     variables = {
         name: value
-        for name, value in parameters  # locals().items()
-        if name
-        not in [
-            'file_path',
-            'save_as',
-        ]
+        for name, value in sorted(parameters, key=lambda x: x[0])
+        if name not in ['file_path', 'save_as']
     }
 
     # Extract the destination directory from the file path
@@ -222,7 +227,9 @@ def open_configuration(
     caption_dropout_rate,
     optimizer,
     optimizer_args,
-    noise_offset_type,noise_offset,adaptive_noise_scale,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
     multires_noise_iterations,
     multires_noise_discount,
     sample_every_n_steps,
@@ -238,6 +245,7 @@ def open_configuration(
     save_last_n_steps_state,
     use_wandb,
     wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
@@ -253,7 +261,7 @@ def open_configuration(
         # load variables from JSON file
         with open(file_path, 'r') as f:
             my_data = json.load(f)
-            print('Loading config...')
+            log.info('Loading config...')
             # Update values to fix deprecated use_8bit_adam checkbox and set appropriate optimizer if it is set to True
             my_data = update_my_data(my_data)
     else:
@@ -270,6 +278,7 @@ def open_configuration(
 
 def train_model(
     headless,
+    print_only,
     pretrained_model_name_or_path,
     v2,
     v_parameterization,
@@ -323,7 +332,9 @@ def train_model(
     caption_dropout_rate,
     optimizer,
     optimizer_args,
-    noise_offset_type,noise_offset,adaptive_noise_scale,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
     multires_noise_iterations,
     multires_noise_discount,
     sample_every_n_steps,
@@ -339,7 +350,11 @@ def train_model(
     save_last_n_steps_state,
     use_wandb,
     wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
 ):
+    print_only_bool = True if print_only.get('label') == 'True' else False
+    log.info(f'Start training Dreambooth...')
+
     headless_bool = True if headless.get('label') == 'True' else False
 
     if pretrained_model_name_or_path == '':
@@ -359,6 +374,9 @@ def train_model(
             msg='Image folder does not exist', headless=headless_bool
         )
         return
+    
+    if not verify_image_folder_pattern(train_data_dir):
+        return
 
     if reg_data_dir != '':
         if not os.path.exists(reg_data_dir):
@@ -366,6 +384,9 @@ def train_model(
                 msg='Regularisation folder does not exist',
                 headless=headless_bool,
             )
+            return
+        
+        if not verify_image_folder_pattern(reg_data_dir):
             return
 
     if output_dir == '':
@@ -387,16 +408,6 @@ def train_model(
         )
         lr_warmup = '0'
 
-    # if float(noise_offset) > 0 and (
-    #     multires_noise_iterations > 0 or multires_noise_discount > 0
-    # ):
-    #     output_message(
-    #         msg="noise offset and multires_noise can't be set at the same time. Only use one or the other.",
-    #         title='Error',
-    #         headless=headless_bool,
-    #     )
-    #     return
-
     # Get a list of all subfolders in train_data_dir, excluding hidden folders
     subfolders = [
         f
@@ -407,10 +418,8 @@ def train_model(
 
     # Check if subfolders are present. If not let the user know and return
     if not subfolders:
-        print(
-            '\033[33mNo subfolders were found in',
-            train_data_dir,
-            " can't train\...033[0m",
+        log.info(
+            f"No {subfolders} were found in train_data_dir can't train..."
         )
         return
 
@@ -422,10 +431,8 @@ def train_model(
         try:
             repeats = int(folder.split('_')[0])
         except ValueError:
-            print(
-                '\033[33mSubfolder',
-                folder,
-                "does not have a proper repeat value, please correct the name or remove it... can't train...\033[0m",
+            log.info(
+                f"Subfolder {folder} does not have a proper repeat value, please correct the name or remove it... can't train..."
             )
             continue
 
@@ -444,31 +451,29 @@ def train_model(
         )
 
         if num_images == 0:
-            print(f'{folder} folder contain no images, skipping...')
+            log.info(f'{folder} folder contain no images, skipping...')
         else:
             # Calculate the total number of steps for this folder
             steps = repeats * num_images
             total_steps += steps
 
             # Print the result
-            print('\033[33mFolder', folder, ':', steps, 'steps\033[0m')
+            log.info(f'Folder {folder} : steps {steps}')
 
     if total_steps == 0:
-        print(
-            '\033[33mNo images were found in folder',
-            train_data_dir,
-            '... please rectify!\033[0m',
+        log.info(
+            f'No images were found in folder {train_data_dir}... please rectify!'
         )
         return
 
     # Print the result
-    # print(f"{total_steps} total steps")
+    # log.info(f"{total_steps} total steps")
 
     if reg_data_dir == '':
         reg_factor = 1
     else:
-        print(
-            '\033[94mRegularisation images are used... Will double the number of steps required...\033[0m'
+        log.info(
+            f'Regularisation images are used... Will double the number of steps required...'
         )
         reg_factor = 2
 
@@ -482,7 +487,7 @@ def train_model(
             * int(reg_factor)
         )
     )
-    print(f'max_train_steps = {max_train_steps}')
+    log.info(f'max_train_steps = {max_train_steps}')
 
     # calculate stop encoder training
     if int(stop_text_encoder_training_pct) == -1:
@@ -493,10 +498,10 @@ def train_model(
         stop_text_encoder_training = math.ceil(
             float(max_train_steps) / 100 * int(stop_text_encoder_training_pct)
         )
-    print(f'stop_text_encoder_training = {stop_text_encoder_training}')
+    log.info(f'stop_text_encoder_training = {stop_text_encoder_training}')
 
     lr_warmup_steps = round(float(int(lr_warmup) * int(max_train_steps) / 100))
-    print(f'lr_warmup_steps = {lr_warmup_steps}')
+    log.info(f'lr_warmup_steps = {lr_warmup_steps}')
 
     run_cmd = f'accelerate launch --num_cpu_threads_per_process={num_cpu_threads_per_process} "train_db.py"'
     if v2:
@@ -515,7 +520,7 @@ def train_model(
     run_cmd += f' --train_data_dir="{train_data_dir}"'
     if len(reg_data_dir):
         run_cmd += f' --reg_data_dir="{reg_data_dir}"'
-    run_cmd += f' --resolution={max_resolution}'
+    run_cmd += f' --resolution="{max_resolution}"'
     run_cmd += f' --output_dir="{output_dir}"'
     if not logging_dir == '':
         run_cmd += f' --logging_dir="{logging_dir}"'
@@ -596,6 +601,7 @@ def train_model(
         save_last_n_steps_state=save_last_n_steps_state,
         use_wandb=use_wandb,
         wandb_api_key=wandb_api_key,
+        scale_v_pred_loss_like_noise_pred=scale_v_pred_loss_like_noise_pred,
     )
 
     run_cmd += run_cmd_sample(
@@ -606,20 +612,28 @@ def train_model(
         output_dir,
     )
 
-    print(run_cmd)
-
-    # Run the command
-    if os.name == 'posix':
-        os.system(run_cmd)
+    if print_only_bool:
+        log.warning(
+            'Here is the trainer command as a reference. It will not be executed:\n'
+        )
+        log.info(run_cmd)
     else:
-        subprocess.run(run_cmd)
+        log.info(run_cmd)
 
-    # check if output_dir/last is a folder... therefore it is a diffuser model
-    last_dir = pathlib.Path(f'{output_dir}/{output_name}')
+        # Run the command
+        if os.name == 'posix':
+            os.system(run_cmd)
+        else:
+            subprocess.run(run_cmd)
 
-    if not last_dir.is_dir():
-        # Copy inference model for v2 if required
-        save_inference_file(output_dir, v2, v_parameterization, output_name)
+        # check if output_dir/last is a folder... therefore it is a diffuser model
+        last_dir = pathlib.Path(f'{output_dir}/{output_name}')
+
+        if not last_dir.is_dir():
+            # Copy inference model for v2 if required
+            save_inference_file(
+                output_dir, v2, v_parameterization, output_name
+            )
 
 
 def dreambooth_tab(
@@ -808,7 +822,9 @@ def dreambooth_tab(
                 bucket_reso_steps,
                 caption_dropout_every_n_epochs,
                 caption_dropout_rate,
-                noise_offset_type,noise_offset,adaptive_noise_scale,
+                noise_offset_type,
+                noise_offset,
+                adaptive_noise_scale,
                 multires_noise_iterations,
                 multires_noise_discount,
                 additional_parameters,
@@ -819,6 +835,7 @@ def dreambooth_tab(
                 save_last_n_steps_state,
                 use_wandb,
                 wandb_api_key,
+                scale_v_pred_loss_like_noise_pred,
             ) = gradio_advanced_training(headless=headless)
             color_aug.change(
                 color_aug_changed,
@@ -846,6 +863,8 @@ def dreambooth_tab(
         )
 
     button_run = gr.Button('Train model', variant='primary')
+
+    button_print = gr.Button('Print training command')
 
     # Setup gradio tensorboard buttons
     button_start_tensorboard, button_stop_tensorboard = gradio_tensorboard()
@@ -915,7 +934,9 @@ def dreambooth_tab(
         caption_dropout_rate,
         optimizer,
         optimizer_args,
-        noise_offset_type,noise_offset,adaptive_noise_scale,
+        noise_offset_type,
+        noise_offset,
+        adaptive_noise_scale,
         multires_noise_iterations,
         multires_noise_discount,
         sample_every_n_steps,
@@ -931,6 +952,7 @@ def dreambooth_tab(
         save_last_n_steps_state,
         use_wandb,
         wandb_api_key,
+        scale_v_pred_loss_like_noise_pred,
     ]
 
     button_open_config.click(
@@ -963,7 +985,13 @@ def dreambooth_tab(
 
     button_run.click(
         train_model,
-        inputs=[dummy_headless] + settings_list,
+        inputs=[dummy_headless] + [dummy_db_false] + settings_list,
+        show_progress=False,
+    )
+
+    button_print.click(
+        train_model,
+        inputs=[dummy_headless] + [dummy_db_true] + settings_list,
         show_progress=False,
     )
 
@@ -979,11 +1007,11 @@ def UI(**kwargs):
     css = ''
 
     headless = kwargs.get('headless', False)
-    print(f'headless: {headless}')
+    log.info(f'headless: {headless}')
 
     if os.path.exists('./style.css'):
         with open(os.path.join('./style.css'), 'r', encoding='utf8') as file:
-            print('Load CSS...')
+            log.info('Load CSS...')
             css += file.read() + '\n'
 
     interface = gr.Blocks(

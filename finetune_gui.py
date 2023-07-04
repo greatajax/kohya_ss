@@ -31,6 +31,11 @@ from library.tensorboard_gui import (
 from library.utilities import utilities_tab
 from library.sampler_gui import sample_gradio_config, run_cmd_sample
 
+from library.custom_logging import setup_logging
+
+# Set up logging
+log = setup_logging()
+
 # from easygui import msgbox
 
 folder_symbol = '\U0001f4c2'  # 📂
@@ -103,7 +108,9 @@ def save_configuration(
     caption_dropout_rate,
     optimizer,
     optimizer_args,
-    noise_offset_type,noise_offset,adaptive_noise_scale,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
     multires_noise_iterations,
     multires_noise_discount,
     sample_every_n_steps,
@@ -119,6 +126,7 @@ def save_configuration(
     save_last_n_steps_state,
     use_wandb,
     wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
@@ -128,14 +136,14 @@ def save_configuration(
     save_as_bool = True if save_as.get('label') == 'True' else False
 
     if save_as_bool:
-        print('Save as...')
+        log.info('Save as...')
         file_path = get_saveasfile_path(file_path)
     else:
-        print('Save...')
+        log.info('Save...')
         if file_path == None or file_path == '':
             file_path = get_saveasfile_path(file_path)
 
-    # print(file_path)
+    # log.info(file_path)
 
     if file_path == None or file_path == '':
         return original_file_path  # In case a file_path was provided and the user decide to cancel the open action
@@ -143,12 +151,8 @@ def save_configuration(
     # Return the values of the variables as a dictionary
     variables = {
         name: value
-        for name, value in parameters  # locals().items()
-        if name
-        not in [
-            'file_path',
-            'save_as',
-        ]
+        for name, value in sorted(parameters, key=lambda x: x[0])
+        if name not in ['file_path', 'save_as']
     }
 
     # Extract the destination directory from the file path
@@ -227,7 +231,9 @@ def open_configuration(
     caption_dropout_rate,
     optimizer,
     optimizer_args,
-    noise_offset_type,noise_offset,adaptive_noise_scale,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
     multires_noise_iterations,
     multires_noise_discount,
     sample_every_n_steps,
@@ -243,6 +249,7 @@ def open_configuration(
     save_last_n_steps_state,
     use_wandb,
     wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
@@ -258,7 +265,7 @@ def open_configuration(
         # load variables from JSON file
         with open(file_path, 'r') as f:
             my_data = json.load(f)
-            print('Loading config...')
+            log.info('Loading config...')
             # Update values to fix deprecated use_8bit_adam checkbox and set appropriate optimizer if it is set to True
             my_data = update_my_data(my_data)
     else:
@@ -275,6 +282,7 @@ def open_configuration(
 
 def train_model(
     headless,
+    print_only,
     pretrained_model_name_or_path,
     v2,
     v_parameterization,
@@ -334,7 +342,9 @@ def train_model(
     caption_dropout_rate,
     optimizer,
     optimizer_args,
-    noise_offset_type,noise_offset,adaptive_noise_scale,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
     multires_noise_iterations,
     multires_noise_discount,
     sample_every_n_steps,
@@ -350,7 +360,11 @@ def train_model(
     save_last_n_steps_state,
     use_wandb,
     wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
 ):
+    print_only_bool = True if print_only.get('label') == 'True' else False
+    log.info(f'Start Finetuning...')
+
     headless_bool = True if headless.get('label') == 'True' else False
 
     if check_if_model_exist(
@@ -391,13 +405,14 @@ def train_model(
         if full_path:
             run_cmd += f' --full_path'
 
-        print(run_cmd)
+        log.info(run_cmd)
 
-        # Run the command
-        if os.name == 'posix':
-            os.system(run_cmd)
-        else:
-            subprocess.run(run_cmd)
+        if not print_only_bool:
+            # Run the command
+            if os.name == 'posix':
+                os.system(run_cmd)
+            else:
+                subprocess.run(run_cmd)
 
     # create images buckets
     if generate_image_buckets:
@@ -416,13 +431,14 @@ def train_model(
         if full_path:
             run_cmd += f' --full_path'
 
-        print(run_cmd)
+        log.info(run_cmd)
 
-        # Run the command
-        if os.name == 'posix':
-            os.system(run_cmd)
-        else:
-            subprocess.run(run_cmd)
+        if not print_only_bool:
+            # Run the command
+            if os.name == 'posix':
+                os.system(run_cmd)
+            else:
+                subprocess.run(run_cmd)
 
     image_num = len(
         [
@@ -433,10 +449,10 @@ def train_model(
             if lower_f.endswith(('.jpg', '.jpeg', '.png', '.webp'))
         ]
     )
-    print(f'image_num = {image_num}')
+    log.info(f'image_num = {image_num}')
 
     repeats = int(image_num) * int(dataset_repeats)
-    print(f'repeats = {str(repeats)}')
+    log.info(f'repeats = {str(repeats)}')
 
     # calculate max_train_steps
     max_train_steps = int(
@@ -452,10 +468,10 @@ def train_model(
     if flip_aug:
         max_train_steps = int(math.ceil(float(max_train_steps) / 2))
 
-    print(f'max_train_steps = {max_train_steps}')
+    log.info(f'max_train_steps = {max_train_steps}')
 
     lr_warmup_steps = round(float(int(lr_warmup) * int(max_train_steps) / 100))
-    print(f'lr_warmup_steps = {lr_warmup_steps}')
+    log.info(f'lr_warmup_steps = {lr_warmup_steps}')
 
     run_cmd = f'accelerate launch --num_cpu_threads_per_process={num_cpu_threads_per_process} "./fine_tune.py"'
     if v2:
@@ -481,7 +497,7 @@ def train_model(
     run_cmd += f' --learning_rate={learning_rate}'
 
     run_cmd += ' --enable_bucket'
-    run_cmd += f' --resolution={max_resolution}'
+    run_cmd += f' --resolution="{max_resolution}"'
     run_cmd += f' --min_bucket_reso={min_bucket_reso}'
     run_cmd += f' --max_bucket_reso={max_bucket_reso}'
 
@@ -550,6 +566,7 @@ def train_model(
         save_last_n_steps_state=save_last_n_steps_state,
         use_wandb=use_wandb,
         wandb_api_key=wandb_api_key,
+        scale_v_pred_loss_like_noise_pred=scale_v_pred_loss_like_noise_pred,
     )
 
     run_cmd += run_cmd_sample(
@@ -560,20 +577,28 @@ def train_model(
         output_dir,
     )
 
-    print(run_cmd)
-
-    # Run the command
-    if os.name == 'posix':
-        os.system(run_cmd)
+    if print_only_bool:
+        log.warning(
+            'Here is the trainer command as a reference. It will not be executed:\n'
+        )
+        log.info(run_cmd)
     else:
-        subprocess.run(run_cmd)
+        log.info(run_cmd)
 
-    # check if output_dir/last is a folder... therefore it is a diffuser model
-    last_dir = pathlib.Path(f'{output_dir}/{output_name}')
+        # Run the command
+        if os.name == 'posix':
+            os.system(run_cmd)
+        else:
+            subprocess.run(run_cmd)
 
-    if not last_dir.is_dir():
-        # Copy inference model for v2 if required
-        save_inference_file(output_dir, v2, v_parameterization, output_name)
+        # check if output_dir/last is a folder... therefore it is a diffuser model
+        last_dir = pathlib.Path(f'{output_dir}/{output_name}')
+
+        if not last_dir.is_dir():
+            # Copy inference model for v2 if required
+            save_inference_file(
+                output_dir, v2, v_parameterization, output_name
+            )
 
 
 def remove_doublequote(file_path):
@@ -778,7 +803,9 @@ def finetune_tab(headless=False):
                 bucket_reso_steps,
                 caption_dropout_every_n_epochs,
                 caption_dropout_rate,
-                noise_offset_type,noise_offset,adaptive_noise_scale,
+                noise_offset_type,
+                noise_offset,
+                adaptive_noise_scale,
                 multires_noise_iterations,
                 multires_noise_discount,
                 additional_parameters,
@@ -789,6 +816,7 @@ def finetune_tab(headless=False):
                 save_last_n_steps_state,
                 use_wandb,
                 wandb_api_key,
+                scale_v_pred_loss_like_noise_pred,
             ) = gradio_advanced_training(headless=headless)
             color_aug.change(
                 color_aug_changed,
@@ -804,6 +832,8 @@ def finetune_tab(headless=False):
         ) = sample_gradio_config()
 
     button_run = gr.Button('Train model', variant='primary')
+
+    button_print = gr.Button('Print training command')
 
     # Setup gradio tensorboard buttons
     button_start_tensorboard, button_stop_tensorboard = gradio_tensorboard()
@@ -878,7 +908,9 @@ def finetune_tab(headless=False):
         caption_dropout_rate,
         optimizer,
         optimizer_args,
-        noise_offset_type,noise_offset,adaptive_noise_scale,
+        noise_offset_type,
+        noise_offset,
+        adaptive_noise_scale,
         multires_noise_iterations,
         multires_noise_discount,
         sample_every_n_steps,
@@ -894,9 +926,20 @@ def finetune_tab(headless=False):
         save_last_n_steps_state,
         use_wandb,
         wandb_api_key,
+        scale_v_pred_loss_like_noise_pred,
     ]
 
-    button_run.click(train_model, inputs=[dummy_headless] + settings_list)
+    button_run.click(
+        train_model,
+        inputs=[dummy_headless] + [dummy_db_false] + settings_list,
+        show_progress=False,
+    )
+
+    button_print.click(
+        train_model,
+        inputs=[dummy_headless] + [dummy_db_true] + settings_list,
+        show_progress=False,
+    )
 
     button_open_config.click(
         open_configuration,
@@ -931,11 +974,11 @@ def UI(**kwargs):
     css = ''
 
     headless = kwargs.get('headless', False)
-    print(f'headless: {headless}')
+    log.info(f'headless: {headless}')
 
     if os.path.exists('./style.css'):
         with open(os.path.join('./style.css'), 'r', encoding='utf8') as file:
-            print('Load CSS...')
+            log.info('Load CSS...')
             css += file.read() + '\n'
 
     interface = gr.Blocks(

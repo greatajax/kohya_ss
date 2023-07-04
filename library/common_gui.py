@@ -1,10 +1,16 @@
 from tkinter import filedialog, Tk
 from easygui import msgbox
 import os
+import re
 import gradio as gr
 import easygui
 import shutil
 import sys
+
+from library.custom_logging import setup_logging
+
+# Set up logging
+log = setup_logging()
 
 folder_symbol = '\U0001f4c2'  # 📂
 refresh_symbol = '\U0001f504'  # 🔄
@@ -39,7 +45,7 @@ def check_if_model_exist(
     output_name, output_dir, save_model_as, headless=False
 ):
     if headless:
-        print(
+        log.info(
             'Headless mode, skipping verification if model already exist... if model already exist it will be overwritten...'
         )
         return False
@@ -49,7 +55,7 @@ def check_if_model_exist(
         if os.path.isdir(ckpt_folder):
             msg = f'A diffuser model with the same name {ckpt_folder} already exists. Do you want to overwrite it?'
             if not easygui.ynbox(msg, 'Overwrite Existing Model?'):
-                print(
+                log.info(
                     'Aborting training due to existing model with same name...'
                 )
                 return True
@@ -58,12 +64,12 @@ def check_if_model_exist(
         if os.path.isfile(ckpt_file):
             msg = f'A model with the same file name {ckpt_file} already exists. Do you want to overwrite it?'
             if not easygui.ynbox(msg, 'Overwrite Existing Model?'):
-                print(
+                log.info(
                     'Aborting training due to existing model with same name...'
                 )
                 return True
     else:
-        print(
+        log.info(
             'Can\'t verify if existing model exist when save model is set a "same as source model", continuing to train model...'
         )
         return False
@@ -73,7 +79,7 @@ def check_if_model_exist(
 
 def output_message(msg='', title='', headless=False):
     if headless:
-        print(msg)
+        log.info(msg)
     else:
         msgbox(msg=msg, title=title)
 
@@ -120,9 +126,9 @@ def update_my_data(my_data):
     ) and my_data.get('save_model_as') not in ['safetensors', 'ckpt']:
         message = 'Updating save_model_as to safetensors because the current value in the config file is no longer applicable to {}'
         if my_data.get('LoRA_type'):
-            print(message.format('LoRA'))
+            log.info(message.format('LoRA'))
         if my_data.get('num_vectors_per_token'):
-            print(message.format('TI'))
+            log.info(message.format('TI'))
         my_data['save_model_as'] = 'safetensors'
 
     return my_data
@@ -151,7 +157,7 @@ def get_file_path(
         and sys.platform != 'darwin'
     ):
         current_file_path = file_path
-        # print(f'current file path: {current_file_path}')
+        # log.info(f'current file path: {current_file_path}')
 
         initial_dir, initial_file = get_dir_and_file(file_path)
 
@@ -178,7 +184,7 @@ def get_file_path(
         if not file_path:
             file_path = current_file_path
         current_file_path = file_path
-        # print(f'current file path: {current_file_path}')
+        # log.info(f'current file path: {current_file_path}')
 
     return file_path
 
@@ -189,7 +195,7 @@ def get_any_file_path(file_path=''):
         and sys.platform != 'darwin'
     ):
         current_file_path = file_path
-        # print(f'current file path: {current_file_path}')
+        # log.info(f'current file path: {current_file_path}')
 
         initial_dir, initial_file = get_dir_and_file(file_path)
 
@@ -257,7 +263,7 @@ def get_saveasfile_path(
         and sys.platform != 'darwin'
     ):
         current_file_path = file_path
-        # print(f'current file path: {current_file_path}')
+        # log.info(f'current file path: {current_file_path}')
 
         initial_dir, initial_file = get_dir_and_file(file_path)
 
@@ -275,15 +281,15 @@ def get_saveasfile_path(
         )
         root.destroy()
 
-        # print(save_file_path)
+        # log.info(save_file_path)
 
         if save_file_path == None:
             file_path = current_file_path
         else:
-            print(save_file_path.name)
+            log.info(save_file_path.name)
             file_path = save_file_path.name
 
-        # print(file_path)
+        # log.info(file_path)
 
     return file_path
 
@@ -296,7 +302,7 @@ def get_saveasfilename_path(
         and sys.platform != 'darwin'
     ):
         current_file_path = file_path
-        # print(f'current file path: {current_file_path}')
+        # log.info(f'current file path: {current_file_path}')
 
         initial_dir, initial_file = get_dir_and_file(file_path)
 
@@ -317,7 +323,7 @@ def get_saveasfilename_path(
         if save_file_path == '':
             file_path = current_file_path
         else:
-            # print(save_file_path)
+            # log.info(save_file_path)
             file_path = save_file_path
 
     return file_path
@@ -401,7 +407,7 @@ def find_replace(
         search_text (str, optional): Text to search for in the caption files.
         replace_text (str, optional): Text to replace the search text with.
     """
-    print('Running caption find/replace')
+    log.info('Running caption find/replace')
 
     if not has_ext_files(folder_path, caption_file_ext):
         msgbox(
@@ -453,7 +459,7 @@ def save_inference_file(output_dir, v2, v_parameterization, output_name):
 
                 # Copy the v2-inference-v.yaml file to the current file, with a .yaml extension
                 if v2 and v_parameterization:
-                    print(
+                    log.info(
                         f'Saving v2-inference-v.yaml as {output_dir}/{file_name}.yaml'
                     )
                     shutil.copy(
@@ -461,7 +467,7 @@ def save_inference_file(output_dir, v2, v_parameterization, output_name):
                         f'{output_dir}/{file_name}.yaml',
                     )
                 elif v2:
-                    print(
+                    log.info(
                         f'Saving v2-inference.yaml as {output_dir}/{file_name}.yaml'
                     )
                     shutil.copy(
@@ -475,14 +481,14 @@ def set_pretrained_model_name_or_path_input(
 ):
     # check if $v2 and $v_parameterization are empty and if $pretrained_model_name_or_path contains any of the substrings in the v2 list
     if str(model_list) in V2_BASE_MODELS:
-        print('SD v2 model detected. Setting --v2 parameter')
+        log.info('SD v2 model detected. Setting --v2 parameter')
         v2 = True
         v_parameterization = False
         pretrained_model_name_or_path = str(model_list)
 
     # check if $v2 and $v_parameterization are empty and if $pretrained_model_name_or_path contains any of the substrings in the v_parameterization list
     if str(model_list) in V_PARAMETERIZATION_MODELS:
-        print(
+        log.info(
             'SD v2 v_parameterization detected. Setting --v2 parameter and --v_parameterization'
         )
         v2 = True
@@ -786,10 +792,15 @@ def gradio_training(
                 'Adafactor',
                 'DAdaptation',
                 'DAdaptAdaGrad',
+                'DAdaptAdam',
                 'DAdaptAdan',
+                'DAdaptAdanIP',
+                'DAdaptAdamPreprint',
+                'DAdaptLion',
                 'DAdaptSGD',
                 'Lion',
                 'Lion8bit',
+                'Prodigy',
                 'SGDNesterov',
                 'SGDNesterov8bit',
             ],
@@ -828,7 +839,7 @@ def get_int_or_default(kwargs, key, default_value=0):
     elif isinstance(value, float):
         return int(value)
     else:
-        print(f'{key} is not an int, float or a string, setting value to {default_value}')
+        log.info(f'{key} is not an int, float or a string, setting value to {default_value}')
         return default_value
     
 def get_float_or_default(kwargs, key, default_value=0.0):
@@ -840,7 +851,7 @@ def get_float_or_default(kwargs, key, default_value=0.0):
     elif isinstance(value, str):
         return float(value)
     else:
-        print(f'{key} is not an int, float or a string, setting value to {default_value}')
+        log.info(f'{key} is not an int, float or a string, setting value to {default_value}')
         return default_value
 
 def get_str_or_default(kwargs, key, default_value=""):
@@ -868,7 +879,7 @@ def run_cmd_training(**kwargs):
     lr_warmup_steps = kwargs.get("lr_warmup_steps", "")
     if lr_warmup_steps:
         if lr_scheduler == 'constant':
-            print('Can\'t use LR warmup with LR Scheduler constant... ignoring...')
+            log.info('Can\'t use LR warmup with LR Scheduler constant... ignoring...')
         else:
             run_cmd += f' --lr_warmup_steps="{lr_warmup_steps}"'
     
@@ -943,7 +954,7 @@ def gradio_advanced_training(headless=False):
             info='(Optional) Save only the specified number of models (old models will be deleted)',
         )
         save_last_n_steps_state = gr.Number(
-            label='Save last N steps',
+            label='Save last N states',
             value=0,
             precision=0,
             info='(Optional) Save only the specified number of states (old models will be deleted)',
@@ -993,8 +1004,8 @@ def gradio_advanced_training(headless=False):
         bucket_no_upscale = gr.Checkbox(
             label="Don't upscale bucket resolution", value=True
         )
-        bucket_reso_steps = gr.Number(
-            label='Bucket resolution steps', value=64
+        bucket_reso_steps = gr.Slider(
+            label='Bucket resolution steps', value=64, minimum=1, maximum=128
         )
         random_crop = gr.Checkbox(
             label='Random crop instead of center crop', value=False
@@ -1093,6 +1104,11 @@ def gradio_advanced_training(headless=False):
             value=False,
             info='If unchecked, tensorboard will be used as the default for logging.',
         )
+        scale_v_pred_loss_like_noise_pred = gr.Checkbox(
+            label='Scale v prediction loss',
+            value=False,
+            info='Only for SD v2 models. By scaling the loss according to the time step, the weights of global noise prediction and local noise prediction become the same, and the improvement of details may be expected.',
+        )
     return (
         # use_8bit_adam,
         xformers,
@@ -1128,6 +1144,7 @@ def gradio_advanced_training(headless=False):
         save_last_n_steps_state,
         use_wandb,
         wandb_api_key,
+        scale_v_pred_loss_like_noise_pred,
     )
 
 
@@ -1233,6 +1250,10 @@ def run_cmd_advanced_training(**kwargs):
     if random_crop:
         run_cmd += ' --random_crop'
         
+    scale_v_pred_loss_like_noise_pred = kwargs.get('scale_v_pred_loss_like_noise_pred')
+    if scale_v_pred_loss_like_noise_pred:
+        run_cmd += ' --scale_v_pred_loss_like_noise_pred'
+        
     noise_offset_type = kwargs.get('noise_offset_type', 'Original')
     if noise_offset_type == 'Original':
         noise_offset = float(kwargs.get("noise_offset", 0))
@@ -1264,3 +1285,43 @@ def run_cmd_advanced_training(**kwargs):
         run_cmd += f' --wandb_api_key="{wandb_api_key}"'
         
     return run_cmd
+
+def verify_image_folder_pattern(folder_path):
+    false_response = True # temporarily set to true to prevent stopping training in case of false positive
+    true_response = True
+
+    # Check if the folder exists
+    if not os.path.isdir(folder_path):
+        log.error(f"The provided path '{folder_path}' is not a valid folder. Please follow the folder structure documentation found at docs\image_folder_structure.md ...")
+        return false_response
+
+    # Create a regular expression pattern to match the required sub-folder names
+    # The pattern should start with one or more digits (\d+) followed by an underscore (_)
+    # After the underscore, it should match one or more word characters (\w+), which can be letters, numbers, or underscores
+    # Example of a valid pattern matching name: 123_example_folder
+    pattern = r'^\d+_\w+'
+
+    # Get the list of sub-folders in the directory
+    subfolders = [
+        os.path.join(folder_path, subfolder)
+        for subfolder in os.listdir(folder_path)
+        if os.path.isdir(os.path.join(folder_path, subfolder))
+    ]
+
+    # Check the pattern of each sub-folder
+    matching_subfolders = [subfolder for subfolder in subfolders if re.match(pattern, os.path.basename(subfolder))]
+
+    # Print non-matching sub-folders
+    non_matching_subfolders = set(subfolders) - set(matching_subfolders)
+    if non_matching_subfolders:
+        log.error(f"The following folders do not match the required pattern <number>_<text>: {', '.join(non_matching_subfolders)}")
+        log.error(f"Please follow the folder structure documentation found at docs\image_folder_structure.md ...")
+        return false_response
+
+    # Check if no sub-folders exist
+    if not matching_subfolders:
+        log.error(f"No image folders found in {folder_path}. Please follow the folder structure documentation found at docs\image_folder_structure.md ...")
+        return false_response
+
+    log.info(f'Valid image folder names found in: {folder_path}')
+    return true_response
