@@ -23,7 +23,7 @@ from library.common_gui import (
     output_message,
     verify_image_folder_pattern,
     SaveConfigFile,
-    save_to_file
+    save_to_file,
 )
 from library.class_configuration_file import ConfigurationFile
 from library.class_source_model import SourceModel
@@ -31,6 +31,7 @@ from library.class_basic_training import BasicTraining
 from library.class_advanced_training import AdvancedTraining
 from library.class_folders import Folders
 from library.class_sdxl_parameters import SDXLParameters
+from library.class_command_executor import CommandExecutor
 from library.tensorboard_gui import (
     gradio_tensorboard,
     start_tensorboard,
@@ -39,13 +40,19 @@ from library.tensorboard_gui import (
 from library.dreambooth_folder_creation_gui import (
     gradio_dreambooth_folder_creation_tab,
 )
+from library.dataset_balancing_gui import gradio_dataset_balancing_tab
 from library.utilities import utilities_tab
 from library.class_sample_images import SampleImages, run_cmd_sample
 
 from library.custom_logging import setup_logging
+from localization_ext import add_javascript
 
 # Set up logging
 log = setup_logging()
+
+# Setup command executor
+executor = CommandExecutor()
+
 
 def save_configuration(
     save_as,
@@ -104,14 +111,18 @@ def save_configuration(
     weights,
     template,
     keep_tokens,
+    lr_scheduler_num_cycles,
+    lr_scheduler_power,
     persistent_data_loader_workers,
     bucket_no_upscale,
     random_crop,
     bucket_reso_steps,
+    v_pred_like_loss,
     caption_dropout_every_n_epochs,
     caption_dropout_rate,
     optimizer,
     optimizer_args,
+    lr_scheduler_args,
     noise_offset_type,
     noise_offset,
     adaptive_noise_scale,
@@ -132,7 +143,7 @@ def save_configuration(
     scale_v_pred_loss_like_noise_pred,
     min_timestep,
     max_timestep,
-    sdxl_no_half_vae
+    sdxl_no_half_vae,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
@@ -161,7 +172,11 @@ def save_configuration(
     if not os.path.exists(destination_directory):
         os.makedirs(destination_directory)
 
-    SaveConfigFile(parameters=parameters, file_path=file_path, exclusion=['file_path', 'save_as'])
+    SaveConfigFile(
+        parameters=parameters,
+        file_path=file_path,
+        exclusion=['file_path', 'save_as'],
+    )
 
     return file_path
 
@@ -223,14 +238,18 @@ def open_configuration(
     weights,
     template,
     keep_tokens,
+    lr_scheduler_num_cycles,
+    lr_scheduler_power,
     persistent_data_loader_workers,
     bucket_no_upscale,
     random_crop,
     bucket_reso_steps,
+    v_pred_like_loss,
     caption_dropout_every_n_epochs,
     caption_dropout_rate,
     optimizer,
     optimizer_args,
+    lr_scheduler_args,
     noise_offset_type,
     noise_offset,
     adaptive_noise_scale,
@@ -251,7 +270,7 @@ def open_configuration(
     scale_v_pred_loss_like_noise_pred,
     min_timestep,
     max_timestep,
-    sdxl_no_half_vae
+    sdxl_no_half_vae,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
@@ -339,14 +358,18 @@ def train_model(
     weights,
     template,
     keep_tokens,
+    lr_scheduler_num_cycles,
+    lr_scheduler_power,
     persistent_data_loader_workers,
     bucket_no_upscale,
     random_crop,
     bucket_reso_steps,
+    v_pred_like_loss,
     caption_dropout_every_n_epochs,
     caption_dropout_rate,
     optimizer,
     optimizer_args,
+    lr_scheduler_args,
     noise_offset_type,
     noise_offset,
     adaptive_noise_scale,
@@ -367,11 +390,11 @@ def train_model(
     scale_v_pred_loss_like_noise_pred,
     min_timestep,
     max_timestep,
-    sdxl_no_half_vae
+    sdxl_no_half_vae,
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
-    
+
     print_only_bool = True if print_only.get('label') == 'True' else False
     log.info(f'Start training TI...')
 
@@ -496,7 +519,7 @@ def train_model(
         reg_factor = 2
 
     # calculate max_train_steps
-    if max_train_steps == '':
+    if max_train_steps == '' or max_train_steps == '0':
         max_train_steps = int(
             math.ceil(
                 float(total_steps)
@@ -528,7 +551,7 @@ def train_model(
         run_cmd += f' "./sdxl_train_textual_inversion.py"'
     else:
         run_cmd += f' "./train_textual_inversion.py"'
-        
+
     if v2:
         run_cmd += ' --v2'
     if v_parameterization:
@@ -561,6 +584,12 @@ def train_model(
         run_cmd += f' --vae="{vae}"'
     if not output_name == '':
         run_cmd += f' --output_name="{output_name}"'
+    if not lr_scheduler_num_cycles == '':
+        run_cmd += f' --lr_scheduler_num_cycles="{lr_scheduler_num_cycles}"'
+    else:
+        run_cmd += f' --lr_scheduler_num_cycles="{epoch}"'
+    if not lr_scheduler_power == '':
+        run_cmd += f' --lr_scheduler_power="{lr_scheduler_power}"'
     if int(max_token_length) > 75:
         run_cmd += f' --max_token_length={max_token_length}'
     if not max_train_epochs == '':
@@ -571,7 +600,7 @@ def train_model(
         )
     if int(gradient_accumulation_steps) > 1:
         run_cmd += f' --gradient_accumulation_steps={int(gradient_accumulation_steps)}'
-    
+
     if sdxl_no_half_vae:
         run_cmd += f' --no_half_vae'
 
@@ -590,6 +619,7 @@ def train_model(
         cache_latents_to_disk=cache_latents_to_disk,
         optimizer=optimizer,
         optimizer_args=optimizer_args,
+        lr_scheduler_args=lr_scheduler_args,
     )
 
     run_cmd += run_cmd_advanced_training(
@@ -612,6 +642,7 @@ def train_model(
         bucket_no_upscale=bucket_no_upscale,
         random_crop=random_crop,
         bucket_reso_steps=bucket_reso_steps,
+        v_pred_like_loss=v_pred_like_loss,
         caption_dropout_every_n_epochs=caption_dropout_every_n_epochs,
         caption_dropout_rate=caption_dropout_rate,
         noise_offset_type=noise_offset_type,
@@ -654,25 +685,29 @@ def train_model(
             'Here is the trainer command as a reference. It will not be executed:\n'
         )
         print(run_cmd)
-        
+
         save_to_file(run_cmd)
     else:
         # Saving config file for model
         current_datetime = datetime.now()
-        formatted_datetime = current_datetime.strftime("%Y%m%d-%H%M%S")
-        file_path = os.path.join(output_dir, f'{output_name}_{formatted_datetime}.json')
-        
+        formatted_datetime = current_datetime.strftime('%Y%m%d-%H%M%S')
+        file_path = os.path.join(
+            output_dir, f'{output_name}_{formatted_datetime}.json'
+        )
+
         log.info(f'Saving training config to {file_path}...')
 
-        SaveConfigFile(parameters=parameters, file_path=file_path, exclusion=['file_path', 'save_as', 'headless', 'print_only'])
-        
+        SaveConfigFile(
+            parameters=parameters,
+            file_path=file_path,
+            exclusion=['file_path', 'save_as', 'headless', 'print_only'],
+        )
+
         log.info(run_cmd)
 
         # Run the command
-        if os.name == 'posix':
-            os.system(run_cmd)
-        else:
-            subprocess.run(run_cmd)
+
+        executor.execute_command(run_cmd=run_cmd)
 
         # check if output_dir/last is a folder... therefore it is a diffuser model
         last_dir = pathlib.Path(f'{output_dir}/{output_name}')
@@ -690,10 +725,10 @@ def ti_tab(
     dummy_db_true = gr.Label(value=True, visible=False)
     dummy_db_false = gr.Label(value=False, visible=False)
     dummy_headless = gr.Label(value=headless, visible=False)
-    
+
     with gr.Tab('Training'):
         gr.Markdown('Train a TI using kohya textual inversion python code...')
-        
+
         # Setup Configuration Files Gradio
         config = ConfigurationFile(headless)
 
@@ -708,58 +743,64 @@ def ti_tab(
         with gr.Tab('Folders'):
             folders = Folders(headless=headless)
         with gr.Tab('Parameters'):
-            with gr.Row():
-                weights = gr.Textbox(
-                    label='Resume TI training',
-                    placeholder='(Optional) Path to existing TI embeding file to keep training',
+            with gr.Tab('Basic', elem_id='basic_tab'):
+                with gr.Row():
+                    weights = gr.Textbox(
+                        label='Resume TI training',
+                        placeholder='(Optional) Path to existing TI embeding file to keep training',
+                    )
+                    weights_file_input = gr.Button(
+                        '📂',
+                        elem_id='open_folder_small',
+                        visible=(not headless),
+                    )
+                    weights_file_input.click(
+                        get_file_path,
+                        outputs=weights,
+                        show_progress=False,
+                    )
+                with gr.Row():
+                    token_string = gr.Textbox(
+                        label='Token string',
+                        placeholder='eg: cat',
+                    )
+                    init_word = gr.Textbox(
+                        label='Init word',
+                        value='*',
+                    )
+                    num_vectors_per_token = gr.Slider(
+                        minimum=1,
+                        maximum=75,
+                        value=1,
+                        step=1,
+                        label='Vectors',
+                    )
+                    # max_train_steps = gr.Textbox(
+                    #     label='Max train steps',
+                    #     placeholder='(Optional) Maximum number of steps',
+                    # )
+                    template = gr.Dropdown(
+                        label='Template',
+                        choices=[
+                            'caption',
+                            'object template',
+                            'style template',
+                        ],
+                        value='caption',
+                    )
+                basic_training = BasicTraining(
+                    learning_rate_value='1e-5',
+                    lr_scheduler_value='cosine',
+                    lr_warmup_value='10',
                 )
-                weights_file_input = gr.Button(
-                    '📂', elem_id='open_folder_small', visible=(not headless)
+
+                # Add SDXL Parameters
+                sdxl_params = SDXLParameters(
+                    source_model.sdxl_checkbox,
+                    show_sdxl_cache_text_encoder_outputs=False,
                 )
-                weights_file_input.click(
-                    get_file_path,
-                    outputs=weights,
-                    show_progress=False,
-                )
-            with gr.Row():
-                token_string = gr.Textbox(
-                    label='Token string',
-                    placeholder='eg: cat',
-                )
-                init_word = gr.Textbox(
-                    label='Init word',
-                    value='*',
-                )
-                num_vectors_per_token = gr.Slider(
-                    minimum=1,
-                    maximum=75,
-                    value=1,
-                    step=1,
-                    label='Vectors',
-                )
-                max_train_steps = gr.Textbox(
-                    label='Max train steps',
-                    placeholder='(Optional) Maximum number of steps',
-                )
-                template = gr.Dropdown(
-                    label='Template',
-                    choices=[
-                        'caption',
-                        'object template',
-                        'style template',
-                    ],
-                    value='caption',
-                )
-            basic_training = BasicTraining(
-                learning_rate_value='1e-5',
-                lr_scheduler_value='cosine',
-                lr_warmup_value='10',
-            )
-                    
-            # Add SDXL Parameters
-            sdxl_params = SDXLParameters(source_model.sdxl_checkbox, show_sdxl_cache_text_encoder_outputs=False)
-                
-            with gr.Accordion('Advanced Configuration', open=False):
+
+            with gr.Tab('Advanced', elem_id='advanced_tab'):
                 advanced_training = AdvancedTraining(headless=headless)
                 advanced_training.color_aug.change(
                     color_aug_changed,
@@ -767,9 +808,10 @@ def ti_tab(
                     outputs=[basic_training.cache_latents],
                 )
 
-            sample = SampleImages()
+            with gr.Tab('Samples', elem_id='samples_tab'):
+                sample = SampleImages()
 
-        with gr.Tab('Tools'):
+        with gr.Tab('Dataset Preparation'):
             gr.Markdown(
                 'This section provide Dreambooth tools to help setup your dataset...'
             )
@@ -780,13 +822,20 @@ def ti_tab(
                 logging_dir_input=folders.logging_dir,
                 headless=headless,
             )
+            gradio_dataset_balancing_tab(headless=headless)
 
-        button_run = gr.Button('Train model', variant='primary')
+        with gr.Row():
+            button_run = gr.Button('Start training', variant='primary')
+
+            button_stop_training = gr.Button('Stop training')
 
         button_print = gr.Button('Print training command')
 
         # Setup gradio tensorboard buttons
-        button_start_tensorboard, button_stop_tensorboard = gradio_tensorboard()
+        (
+            button_start_tensorboard,
+            button_stop_tensorboard,
+        ) = gradio_tensorboard()
 
         button_start_tensorboard.click(
             start_tensorboard,
@@ -841,7 +890,7 @@ def ti_tab(
             advanced_training.vae,
             folders.output_name,
             advanced_training.max_token_length,
-            advanced_training.max_train_epochs,
+            basic_training.max_train_epochs,
             advanced_training.max_data_loader_n_workers,
             advanced_training.mem_eff_attn,
             advanced_training.gradient_accumulation_steps,
@@ -849,18 +898,22 @@ def ti_tab(
             token_string,
             init_word,
             num_vectors_per_token,
-            max_train_steps,
+            basic_training.max_train_steps,
             weights,
             template,
             advanced_training.keep_tokens,
+            basic_training.lr_scheduler_num_cycles,
+            basic_training.lr_scheduler_power,
             advanced_training.persistent_data_loader_workers,
             advanced_training.bucket_no_upscale,
             advanced_training.random_crop,
             advanced_training.bucket_reso_steps,
+            advanced_training.v_pred_like_loss,
             advanced_training.caption_dropout_every_n_epochs,
             advanced_training.caption_dropout_rate,
             basic_training.optimizer,
             basic_training.optimizer_args,
+            basic_training.lr_scheduler_args,
             advanced_training.noise_offset_type,
             advanced_training.noise_offset,
             advanced_training.adaptive_noise_scale,
@@ -918,6 +971,8 @@ def ti_tab(
             show_progress=False,
         )
 
+        button_stop_training.click(executor.kill_command)
+
         button_print.click(
             train_model,
             inputs=[dummy_headless] + [dummy_db_true] + settings_list,
@@ -933,6 +988,7 @@ def ti_tab(
 
 
 def UI(**kwargs):
+    add_javascript(kwargs.get('language'))
     css = ''
 
     headless = kwargs.get('headless', False)
@@ -1016,6 +1072,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '--headless', action='store_true', help='Is the server headless'
     )
+    parser.add_argument(
+        '--language', type=str, default=None, help='Set custom language'
+    )
 
     args = parser.parse_args()
 
@@ -1027,4 +1086,5 @@ if __name__ == '__main__':
         share=args.share,
         listen=args.listen,
         headless=args.headless,
+        language=args.language,
     )

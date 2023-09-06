@@ -1,16 +1,19 @@
 import torch
+from accelerate import init_empty_weights
+from accelerate.utils.modeling import set_module_tensor_to_device
 from safetensors.torch import load_file, save_file
 from transformers import CLIPTextModel, CLIPTextConfig, CLIPTextModelWithProjection, CLIPTokenizer
-from diffusers import AutoencoderKL, EulerDiscreteScheduler, StableDiffusionXLPipeline, UNet2DConditionModel
+from typing import List
+from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
 from library import model_util
 from library import sdxl_original_unet
 
 
 VAE_SCALE_FACTOR = 0.13025
-MODEL_VERSION_SDXL_BASE_V0_9 = "sdxl_base_v0-9"
+MODEL_VERSION_SDXL_BASE_V1_0 = "sdxl_base_v1-0"
 
 # Diffusersの設定を読み込むための参照モデル
-DIFFUSERS_REF_MODEL_ID_SDXL = "stabilityai/stable-diffusion-xl-base-0.9"  # アクセス権が必要
+DIFFUSERS_REF_MODEL_ID_SDXL = "stabilityai/stable-diffusion-xl-base-1.0"
 
 DIFFUSERS_SDXL_UNET_CONFIG = {
     "act_fn": "silu",
@@ -133,13 +136,39 @@ def convert_sdxl_text_encoder_2_checkpoint(checkpoint, max_length):
     return new_sd, logit_scale
 
 
-def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location):
+# load state_dict without allocating new tensors
+def _load_state_dict_on_device(model, state_dict, device, dtype=None):
+    # dtype will use fp32 as default
+    missing_keys = list(model.state_dict().keys() - state_dict.keys())
+    unexpected_keys = list(state_dict.keys() - model.state_dict().keys())
+
+    # similar to model.load_state_dict()
+    if not missing_keys and not unexpected_keys:
+        for k in list(state_dict.keys()):
+            set_module_tensor_to_device(model, k, device, value=state_dict.pop(k), dtype=dtype)
+        return "<All keys matched successfully>"
+
+    # error_msgs
+    error_msgs: List[str] = []
+    if missing_keys:
+        error_msgs.insert(0, "Missing key(s) in state_dict: {}. ".format(", ".join('"{}"'.format(k) for k in missing_keys)))
+    if unexpected_keys:
+        error_msgs.insert(0, "Unexpected key(s) in state_dict: {}. ".format(", ".join('"{}"'.format(k) for k in unexpected_keys)))
+
+    raise RuntimeError("Error(s) in loading state_dict for {}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs)))
+
+
+def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dtype=None):
     # model_version is reserved for future use
+    # dtype is used for full_fp16/bf16 integration. Text Encoder will remain fp32, because it runs on CPU when caching
 
     # Load the state dict
     if model_util.is_safetensors(ckpt_path):
         checkpoint = None
-        state_dict = load_file(ckpt_path, device=map_location)
+        try:
+            state_dict = load_file(ckpt_path, device=map_location)
+        except:
+            state_dict = load_file(ckpt_path)  # prevent device invalid Error
         epoch = None
         global_step = None
     else:
@@ -156,16 +185,16 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location):
 
     # U-Net
     print("building U-Net")
-    unet = sdxl_original_unet.SdxlUNet2DConditionModel()
+    with init_empty_weights():
+        unet = sdxl_original_unet.SdxlUNet2DConditionModel()
 
     print("loading U-Net from checkpoint")
     unet_sd = {}
     for k in list(state_dict.keys()):
         if k.startswith("model.diffusion_model."):
             unet_sd[k.replace("model.diffusion_model.", "")] = state_dict.pop(k)
-    info = unet.load_state_dict(unet_sd)
+    info = _load_state_dict_on_device(unet, unet_sd, device=map_location, dtype=dtype)
     print("U-Net: ", info)
-    del unet_sd
 
     # Text Encoders
     print("building text encoders")
@@ -192,7 +221,8 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location):
         # torch_dtype="float32",
         # transformers_version="4.25.0.dev0",
     )
-    text_model1 = CLIPTextModel._from_config(text_model1_cfg)
+    with init_empty_weights():
+        text_model1 = CLIPTextModel._from_config(text_model1_cfg)
 
     # Text Encoder 2 is different from Stability AI's SDXL. SDXL uses open clip, but we use the model from HuggingFace.
     # Note: Tokenizer from HuggingFace is different from SDXL. We must use open clip's tokenizer.
@@ -217,7 +247,8 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location):
         # torch_dtype="float32",
         # transformers_version="4.25.0.dev0",
     )
-    text_model2 = CLIPTextModelWithProjection(text_model2_cfg)
+    with init_empty_weights():
+        text_model2 = CLIPTextModelWithProjection(text_model2_cfg)
 
     print("loading text encoders from checkpoint")
     te1_sd = {}
@@ -228,21 +259,22 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location):
         elif k.startswith("conditioner.embedders.1.model."):
             te2_sd[k] = state_dict.pop(k)
 
-    info1 = text_model1.load_state_dict(te1_sd)
+    info1 = _load_state_dict_on_device(text_model1, te1_sd, device=map_location)  # remain fp32
     print("text encoder 1:", info1)
 
     converted_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(te2_sd, max_length=77)
-    info2 = text_model2.load_state_dict(converted_sd)
+    info2 = _load_state_dict_on_device(text_model2, converted_sd, device=map_location)  # remain fp32
     print("text encoder 2:", info2)
 
     # prepare vae
     print("building VAE")
     vae_config = model_util.create_vae_diffusers_config()
-    vae = AutoencoderKL(**vae_config)  # .to(device)
+    with init_empty_weights():
+        vae = AutoencoderKL(**vae_config)
 
     print("loading VAE from checkpoint")
     converted_vae_checkpoint = model_util.convert_ldm_vae_checkpoint(state_dict, vae_config)
-    info = vae.load_state_dict(converted_vae_checkpoint)
+    info = _load_state_dict_on_device(vae, converted_vae_checkpoint, device=map_location, dtype=dtype)
     print("VAE:", info)
 
     ckpt_info = (epoch, global_step) if epoch is not None else None
@@ -439,6 +471,7 @@ def save_stable_diffusion_checkpoint(
     ckpt_info,
     vae,
     logit_scale,
+    metadata,
     save_dtype=None,
 ):
     state_dict = {}
@@ -476,7 +509,7 @@ def save_stable_diffusion_checkpoint(
     new_ckpt["global_step"] = steps
 
     if model_util.is_safetensors(output_file):
-        save_file(state_dict, output_file)
+        save_file(state_dict, output_file, metadata)
     else:
         torch.save(new_ckpt, output_file)
 
@@ -486,6 +519,8 @@ def save_stable_diffusion_checkpoint(
 def save_diffusers_checkpoint(
     output_dir, text_encoder1, text_encoder2, unet, pretrained_model_name_or_path, vae=None, use_safetensors=False, save_dtype=None
 ):
+    from diffusers import StableDiffusionXLPipeline
+
     # convert U-Net
     unet_sd = unet.state_dict()
     du_unet_sd = convert_sdxl_unet_state_dict_to_diffusers(unet_sd)

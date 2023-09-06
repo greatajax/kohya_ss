@@ -34,7 +34,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 from torchvision import transforms
-from transformers import CLIPTokenizer
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextModelWithProjection
 import transformers
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 from diffusers import (
@@ -55,18 +55,17 @@ from diffusers import (
 from library import custom_train_functions
 from library.original_unet import UNet2DConditionModel
 from huggingface_hub import hf_hub_download
-import albumentations as albu
 import numpy as np
 from PIL import Image
 import cv2
-from einops import rearrange
-from torch import einsum
 import safetensors.torch
 from library.lpw_stable_diffusion import StableDiffusionLongPromptWeightingPipeline
 import library.model_util as model_util
 import library.huggingface_util as huggingface_util
-from library.attention_processors import FlashAttnProcessor
-from library.hypernetwork import replace_attentions_for_hypernetwork
+import library.sai_model_spec as sai_model_spec
+
+# from library.attention_processors import FlashAttnProcessor
+# from library.hypernetwork import replace_attentions_for_hypernetwork
 from library.original_unet import UNet2DConditionModel
 
 # Tokenizer: checkpointから読み込むのではなくあらかじめ提供されているものを使う
@@ -97,6 +96,13 @@ try:
 except:
     pass
 
+try:
+    from jxlpy import JXLImagePlugin
+
+    IMAGE_EXTENSIONS.extend([".jxl", ".JXL"])
+except:
+    pass
+
 IMAGE_TRANSFORMS = transforms.Compose(
     [
         transforms.ToTensor(),
@@ -121,7 +127,7 @@ class ImageInfo:
         self.latents_flipped: torch.Tensor = None
         self.latents_npz: str = None
         self.latents_original_size: Tuple[int, int] = None  # original image size, not latents size
-        self.latents_crop_left_top: Tuple[int, int] = None  # original image crop left top, not latents crop left top
+        self.latents_crop_ltrb: Tuple[int, int] = None  # crop left top right bottom in original pixel size, not latents size
         self.cond_img_path: str = None
         self.image: Optional[Image.Image] = None  # optional, original PIL Image
         # SDXL, optional
@@ -256,6 +262,26 @@ class BucketManager:
         ar_error = (reso[0] / reso[1]) - aspect_ratio
         return reso, resized_size, ar_error
 
+    @staticmethod
+    def get_crop_ltrb(bucket_reso: Tuple[int, int], image_size: Tuple[int, int]):
+        # Stability AIの前処理に合わせてcrop left/topを計算する。crop rightはflipのaugmentationのために求める
+        # Calculate crop left/top according to the preprocessing of Stability AI. Crop right is calculated for flip augmentation.
+
+        bucket_ar = bucket_reso[0] / bucket_reso[1]
+        image_ar = image_size[0] / image_size[1]
+        if bucket_ar > image_ar:
+            # bucketのほうが横長→縦を合わせる
+            resized_width = bucket_reso[1] * image_ar
+            resized_height = bucket_reso[1]
+        else:
+            resized_width = bucket_reso[0]
+            resized_height = bucket_reso[0] / image_ar
+        crop_left = (bucket_reso[0] - resized_width) // 2
+        crop_top = (bucket_reso[1] - resized_height) // 2
+        crop_right = crop_left + resized_width
+        crop_bottom = crop_top + resized_height
+        return crop_left, crop_top, crop_right, crop_bottom
+
 
 class BucketBatchIndex(NamedTuple):
     bucket_index: int
@@ -264,42 +290,40 @@ class BucketBatchIndex(NamedTuple):
 
 
 class AugHelper:
+    # albumentationsへの依存をなくしたがとりあえず同じinterfaceを持たせる
+
     def __init__(self):
-        # prepare all possible augmentators
-        self.color_aug_method = albu.OneOf(
-            [
-                albu.HueSaturationValue(8, 0, 0, p=0.5),
-                albu.RandomGamma((95, 105), p=0.5),
-            ],
-            p=0.33,
-        )
+        pass
 
-        # key: (use_color_aug, use_flip_aug)
-        # self.augmentors = {
-        #     (True, True): albu.Compose(
-        #         [
-        #             color_aug_method,
-        #             flip_aug_method,
-        #         ],
-        #         p=1.0,
-        #     ),
-        #     (True, False): albu.Compose(
-        #         [
-        #             color_aug_method,
-        #         ],
-        #         p=1.0,
-        #     ),
-        #     (False, True): albu.Compose(
-        #         [
-        #             flip_aug_method,
-        #         ],
-        #         p=1.0,
-        #     ),
-        #     (False, False): None,
-        # }
+    def color_aug(self, image: np.ndarray):
+        # self.color_aug_method = albu.OneOf(
+        #     [
+        #         albu.HueSaturationValue(8, 0, 0, p=0.5),
+        #         albu.RandomGamma((95, 105), p=0.5),
+        #     ],
+        #     p=0.33,
+        # )
+        hue_shift_limit = 8
 
-    def get_augmentor(self, use_color_aug: bool) -> Optional[albu.Compose]:
-        return self.color_aug_method if use_color_aug else None
+        # remove dependency to albumentations
+        if random.random() <= 0.33:
+            if random.random() > 0.5:
+                # hue shift
+                hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+                hue_shift = random.uniform(-hue_shift_limit, hue_shift_limit)
+                if hue_shift < 0:
+                    hue_shift = 180 + hue_shift
+                hsv_img[:, :, 0] = (hsv_img[:, :, 0] + hue_shift) % 180
+                image = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+            else:
+                # random gamma
+                gamma = random.uniform(0.95, 1.05)
+                image = np.clip(image**gamma, 0, 255).astype(np.uint8)
+
+        return {"image": image}
+
+    def get_augmentor(self, use_color_aug: bool):  # -> Optional[Callable[[np.ndarray], Dict[str, np.ndarray]]]:
+        return self.color_aug if use_color_aug else None
 
 
 class BaseSubset:
@@ -316,6 +340,8 @@ class BaseSubset:
         caption_dropout_rate: float,
         caption_dropout_every_n_epochs: int,
         caption_tag_dropout_rate: float,
+        caption_prefix: Optional[str],
+        caption_suffix: Optional[str],
         token_warmup_min: int,
         token_warmup_step: Union[float, int],
     ) -> None:
@@ -330,6 +356,8 @@ class BaseSubset:
         self.caption_dropout_rate = caption_dropout_rate
         self.caption_dropout_every_n_epochs = caption_dropout_every_n_epochs
         self.caption_tag_dropout_rate = caption_tag_dropout_rate
+        self.caption_prefix = caption_prefix
+        self.caption_suffix = caption_suffix
 
         self.token_warmup_min = token_warmup_min  # step=0におけるタグの数
         self.token_warmup_step = token_warmup_step  # N（N<1ならN*max_train_steps）ステップ目でタグの数が最大になる
@@ -354,6 +382,8 @@ class DreamBoothSubset(BaseSubset):
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
+        caption_prefix,
+        caption_suffix,
         token_warmup_min,
         token_warmup_step,
     ) -> None:
@@ -371,6 +401,8 @@ class DreamBoothSubset(BaseSubset):
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
+            caption_prefix,
+            caption_suffix,
             token_warmup_min,
             token_warmup_step,
         )
@@ -402,6 +434,8 @@ class FineTuningSubset(BaseSubset):
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
+        caption_prefix,
+        caption_suffix,
         token_warmup_min,
         token_warmup_step,
     ) -> None:
@@ -419,6 +453,8 @@ class FineTuningSubset(BaseSubset):
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
+            caption_prefix,
+            caption_suffix,
             token_warmup_min,
             token_warmup_step,
         )
@@ -447,6 +483,8 @@ class ControlNetSubset(BaseSubset):
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
+        caption_prefix,
+        caption_suffix,
         token_warmup_min,
         token_warmup_step,
     ) -> None:
@@ -464,6 +502,8 @@ class ControlNetSubset(BaseSubset):
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
+            caption_prefix,
+            caption_suffix,
             token_warmup_min,
             token_warmup_step,
         )
@@ -571,6 +611,12 @@ class BaseDataset(torch.utils.data.Dataset):
         self.replacements[str_from] = str_to
 
     def process_caption(self, subset: BaseSubset, caption):
+        # caption に prefix/suffix を付ける
+        if subset.caption_prefix:
+            caption = subset.caption_prefix + " " + caption
+        if subset.caption_suffix:
+            caption = caption + " " + subset.caption_suffix
+
         # dropoutの決定：tag dropがこのメソッド内にあるのでここで行うのが良い
         is_drop_out = subset.caption_dropout_rate > 0 and random.random() < subset.caption_dropout_rate
         is_drop_out = (
@@ -782,6 +828,12 @@ class BaseDataset(torch.utils.data.Dataset):
 
         random.shuffle(self.buckets_indices)
         self.bucket_manager.shuffle()
+
+    def verify_bucket_reso_steps(self, min_steps: int):
+        assert self.bucket_reso_steps is None or self.bucket_reso_steps % min_steps == 0, (
+            f"bucket_reso_steps is {self.bucket_reso_steps}. it must be divisible by {min_steps}.\n"
+            + f"bucket_reso_stepsが{self.bucket_reso_steps}です。{min_steps}で割り切れる必要があります"
+        )
 
     def is_latent_cacheable(self):
         return all([not subset.color_aug and not subset.random_crop for subset in self.subsets])
@@ -1016,7 +1068,7 @@ class BaseDataset(torch.utils.data.Dataset):
             # image/latentsを処理する
             if image_info.latents is not None:  # cache_latents=Trueの場合
                 original_size = image_info.latents_original_size
-                crop_left_top = image_info.latents_crop_left_top  # calc values later if flipped
+                crop_ltrb = image_info.latents_crop_ltrb  # calc values later if flipped
                 if not flipped:
                     latents = image_info.latents
                 else:
@@ -1024,7 +1076,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
                 image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
-                latents, original_size, crop_left_top, flipped_latents = load_latents_from_disk(image_info.latents_npz)
+                latents, original_size, crop_ltrb, flipped_latents = load_latents_from_disk(image_info.latents_npz)
                 if flipped:
                     latents = flipped_latents
                     del flipped_latents
@@ -1037,7 +1089,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 im_h, im_w = img.shape[0:2]
 
                 if self.enable_bucket:
-                    img, original_size, crop_left_top = trim_and_resize_if_required(
+                    img, original_size, crop_ltrb = trim_and_resize_if_required(
                         subset.random_crop, img, image_info.bucket_reso, image_info.resized_size
                     )
                 else:
@@ -1060,7 +1112,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     ), f"image size is small / 画像サイズが小さいようです: {image_info.absolute_path}"
 
                     original_size = [im_w, im_h]
-                    crop_left_top = [0, 0]
+                    crop_ltrb = (0, 0, 0, 0)
 
                 # augmentation
                 aug = self.aug_helper.get_augmentor(subset.color_aug)
@@ -1078,12 +1130,15 @@ class BaseDataset(torch.utils.data.Dataset):
 
             target_size = (image.shape[2], image.shape[1]) if image is not None else (latents.shape[2] * 8, latents.shape[1] * 8)
 
-            if flipped:
-                crop_left_top = (original_size[0] - crop_left_top[0] - target_size[0], crop_left_top[1])
+            if not flipped:
+                crop_left_top = (crop_ltrb[0], crop_ltrb[1])
+            else:
+                # crop_ltrb[2] is right, so target_size[0] - crop_ltrb[2] is left in flipped image
+                crop_left_top = (target_size[0] - crop_ltrb[2], crop_ltrb[1])
 
-            original_sizes_hw.append((original_size[1], original_size[0]))
-            crop_top_lefts.append((crop_left_top[1], crop_left_top[0]))
-            target_sizes_hw.append((target_size[1], target_size[0]))
+            original_sizes_hw.append((int(original_size[1]), int(original_size[0])))
+            crop_top_lefts.append((int(crop_left_top[1]), int(crop_left_top[0])))
+            target_sizes_hw.append((int(target_size[1]), int(target_size[0])))
             flippeds.append(flipped)
 
             # captionとtext encoder outputを処理する
@@ -1650,6 +1705,8 @@ class ControlNetDataset(BaseDataset):
                 subset.caption_dropout_rate,
                 subset.caption_dropout_every_n_epochs,
                 subset.caption_tag_dropout_rate,
+                subset.caption_prefix,
+                subset.caption_suffix,
                 subset.token_warmup_min,
                 subset.token_warmup_step,
             )
@@ -1717,6 +1774,9 @@ class ControlNetDataset(BaseDataset):
         self.bucket_manager = self.dreambooth_dataset_delegate.bucket_manager
         self.buckets_indices = self.dreambooth_dataset_delegate.buckets_indices
 
+    def cache_latents(self, vae, vae_batch_size=1, cache_to_disk=False, is_main_process=True):
+        return self.dreambooth_dataset_delegate.cache_latents(vae, vae_batch_size, cache_to_disk, is_main_process)
+
     def __len__(self):
         return self.dreambooth_dataset_delegate.__len__()
 
@@ -1741,17 +1801,26 @@ class ControlNetDataset(BaseDataset):
             cond_img = load_image(image_info.cond_img_path)
 
             if self.dreambooth_dataset_delegate.enable_bucket:
-                cond_img = cv2.resize(cond_img, image_info.resized_size, interpolation=cv2.INTER_AREA)  # INTER_AREAでやりたいのでcv2でリサイズ
                 assert (
                     cond_img.shape[0] == original_size_hw[0] and cond_img.shape[1] == original_size_hw[1]
                 ), f"size of conditioning image is not match / 画像サイズが合いません: {image_info.absolute_path}"
-                ct, cl = crop_top_left
+                cond_img = cv2.resize(cond_img, image_info.resized_size, interpolation=cv2.INTER_AREA)  # INTER_AREAでやりたいのでcv2でリサイズ
+
+                # TODO support random crop
+                # 現在サポートしているcropはrandomではなく中央のみ
                 h, w = target_size_hw
+                ct = (cond_img.shape[0] - h) // 2
+                cl = (cond_img.shape[1] - w) // 2
                 cond_img = cond_img[ct : ct + h, cl : cl + w]
             else:
-                assert (
-                    cond_img.shape[0] == self.height and cond_img.shape[1] == self.width
-                ), f"image size is small / 画像サイズが小さいようです: {image_info.absolute_path}"
+                # assert (
+                #     cond_img.shape[0] == self.height and cond_img.shape[1] == self.width
+                # ), f"image size is small / 画像サイズが小さいようです: {image_info.absolute_path}"
+                # resize to target
+                if cond_img.shape[0] != target_size_hw[0] or cond_img.shape[1] != target_size_hw[1]:
+                    cond_img = cv2.resize(
+                        cond_img, (int(target_size_hw[1]), int(target_size_hw[0])), interpolation=cv2.INTER_LANCZOS4
+                    )
 
             if flipped:
                 cond_img = cond_img[:, ::-1, :].copy()  # copy to avoid negative stride
@@ -1811,6 +1880,10 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
         for dataset in self.datasets:
             dataset.set_caching_mode(caching_mode)
 
+    def verify_bucket_reso_steps(self, min_steps: int):
+        for dataset in self.datasets:
+            dataset.verify_bucket_reso_steps(min_steps)
+
     def is_latent_cacheable(self) -> bool:
         return all([dataset.is_latent_cacheable() for dataset in self.datasets])
 
@@ -1841,7 +1914,7 @@ def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool):
         return False
 
     npz = np.load(npz_path)
-    if "latents" not in npz or "original_size" not in npz or "crop_left_top" not in npz:  # old ver?
+    if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
         return False
     if npz["latents"].shape[1:3] != expected_latents_size:
         return False
@@ -1861,17 +1934,16 @@ def load_latents_from_disk(
 ) -> Tuple[Optional[torch.Tensor], Optional[List[int]], Optional[List[int]], Optional[torch.Tensor]]:
     npz = np.load(npz_path)
     if "latents" not in npz:
-        print(f"error: npz is old format. please re-generate {npz_path}")
-        return None, None, None, None
+        raise ValueError(f"error: npz is old format. please re-generate {npz_path}")
 
     latents = npz["latents"]
     original_size = npz["original_size"].tolist()
-    crop_left_top = npz["crop_left_top"].tolist()
+    crop_ltrb = npz["crop_ltrb"].tolist()
     flipped_latents = npz["latents_flipped"] if "latents_flipped" in npz else None
-    return latents, original_size, crop_left_top, flipped_latents
+    return latents, original_size, crop_ltrb, flipped_latents
 
 
-def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_left_top, flipped_latents_tensor=None):
+def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_ltrb, flipped_latents_tensor=None):
     kwargs = {}
     if flipped_latents_tensor is not None:
         kwargs["latents_flipped"] = flipped_latents_tensor.float().cpu().numpy()
@@ -1879,7 +1951,7 @@ def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_left_top,
         npz_path,
         latents=latents_tensor.float().cpu().numpy(),
         original_size=np.array(original_size),
-        crop_left_top=np.array(crop_left_top),
+        crop_ltrb=np.array(crop_ltrb),
         **kwargs,
     )
 
@@ -1918,7 +1990,7 @@ def debug_dataset(train_dataset, show_input_ids=False):
                 )
             ):
                 print(
-                    f'{ik}, size: {train_dataset.image_data[ik].image_size}, loss weight: {lw}, caption: "{cap}", original size: {orgsz}, crop left top: {crptl}, target size: {trgsz}, flipped: {flpdz}'
+                    f'{ik}, size: {train_dataset.image_data[ik].image_size}, loss weight: {lw}, caption: "{cap}", original size: {orgsz}, crop top left: {crptl}, target size: {trgsz}, flipped: {flpdz}'
                 )
 
                 if show_input_ids:
@@ -1935,7 +2007,7 @@ def debug_dataset(train_dataset, show_input_ids=False):
                     if "conditioning_images" in example:
                         cond_img = example["conditioning_images"][j]
                         print(f"conditioning image size: {cond_img.size()}")
-                        cond_img = (cond_img.numpy() * 255.0).astype(np.uint8)
+                        cond_img = ((cond_img.numpy() + 1.0) * 127.5).astype(np.uint8)
                         cond_img = np.transpose(cond_img, (1, 2, 0))
                         cond_img = cond_img[:, :, ::-1]
                         if os.name == "nt":
@@ -2001,6 +2073,9 @@ class MinimalDataset(BaseDataset):
         self.is_reg = False
         self.image_dir = "dummy"  # for metadata
 
+    def verify_bucket_reso_steps(self, min_steps: int):
+        pass
+
     def is_latent_cacheable(self) -> bool:
         return False
 
@@ -2063,35 +2138,37 @@ def load_image(image_path):
     return img
 
 
-# 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top)
+# 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top, crop right, crop bottom)
 def trim_and_resize_if_required(
     random_crop: bool, image: Image.Image, reso, resized_size: Tuple[int, int]
-) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int]]:
+) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int, int, int]]:
     image_height, image_width = image.shape[0:2]
+    original_size = (image_width, image_height)  # size before resize
 
     if image_width != resized_size[0] or image_height != resized_size[1]:
         # リサイズする
         image = cv2.resize(image, resized_size, interpolation=cv2.INTER_AREA)  # INTER_AREAでやりたいのでcv2でリサイズ
 
     image_height, image_width = image.shape[0:2]
-    original_size = (image_width, image_height)
 
-    crop_left_top = (0, 0)
     if image_width > reso[0]:
         trim_size = image_width - reso[0]
         p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
         # print("w", trim_size, p)
         image = image[:, p : p + reso[0]]
-        crop_left_top = (p, 0)
     if image_height > reso[1]:
         trim_size = image_height - reso[1]
         p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
         # print("h", trim_size, p)
         image = image[p : p + reso[1]]
-        crop_left_top = (crop_left_top[0], p)
+
+    # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
+    # I have no idea how to reflect the cropped value in crop left/top in the case of random crop
+
+    crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
 
     assert image.shape[0] == reso[1] and image.shape[1] == reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
-    return image, original_size, crop_left_top
+    return image, original_size, crop_ltrb
 
 
 def cache_batch_latents(
@@ -2104,18 +2181,18 @@ def cache_batch_latents(
         flipped latents is also saved if flip_aug is True
     if cache_to_disk is False, set info.latents
         latents_flipped is also set if flip_aug is True
-    latents_original_size and latents_crop_left_top are also set
+    latents_original_size and latents_crop_ltrb are also set
     """
     images = []
     for info in image_infos:
         image = load_image(info.absolute_path) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_left_top = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size)
+        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size)
         image = IMAGE_TRANSFORMS(image)
         images.append(image)
 
         info.latents_original_size = original_size
-        info.latents_crop_left_top = crop_left_top
+        info.latents_crop_ltrb = crop_ltrb
 
     img_tensors = torch.stack(images, dim=0)
     img_tensors = img_tensors.to(device=vae.device, dtype=vae.dtype)
@@ -2136,11 +2213,15 @@ def cache_batch_latents(
             raise RuntimeError(f"NaN detected in latents: {info.absolute_path}")
 
         if cache_to_disk:
-            save_latents_to_disk(info.latents_npz, latent, info.latents_original_size, info.latents_crop_left_top, flipped_latent)
+            save_latents_to_disk(info.latents_npz, latent, info.latents_original_size, info.latents_crop_ltrb, flipped_latent)
         else:
             info.latents = latent
             if flip_aug:
                 info.latents_flipped = flipped_latent
+
+    # FIXME this slows down caching a lot, specify this as an option
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def cache_batch_text_encoder_outputs(
@@ -2434,6 +2515,106 @@ def replace_vae_attn_to_memory_efficient():
 # region arguments
 
 
+def load_metadata_from_safetensors(safetensors_file: str) -> dict:
+    """r
+    This method locks the file. see https://github.com/huggingface/safetensors/issues/164
+    If the file isn't .safetensors or doesn't have metadata, return empty dict.
+    """
+    if os.path.splitext(safetensors_file)[1] != ".safetensors":
+        return {}
+
+    with safetensors.safe_open(safetensors_file, framework="pt", device="cpu") as f:
+        metadata = f.metadata()
+    if metadata is None:
+        metadata = {}
+    return metadata
+
+
+# this metadata is referred from train_network and various scripts, so we wrote here
+SS_METADATA_KEY_V2 = "ss_v2"
+SS_METADATA_KEY_BASE_MODEL_VERSION = "ss_base_model_version"
+SS_METADATA_KEY_NETWORK_MODULE = "ss_network_module"
+SS_METADATA_KEY_NETWORK_DIM = "ss_network_dim"
+SS_METADATA_KEY_NETWORK_ALPHA = "ss_network_alpha"
+SS_METADATA_KEY_NETWORK_ARGS = "ss_network_args"
+
+SS_METADATA_MINIMUM_KEYS = [
+    SS_METADATA_KEY_V2,
+    SS_METADATA_KEY_BASE_MODEL_VERSION,
+    SS_METADATA_KEY_NETWORK_MODULE,
+    SS_METADATA_KEY_NETWORK_DIM,
+    SS_METADATA_KEY_NETWORK_ALPHA,
+    SS_METADATA_KEY_NETWORK_ARGS,
+]
+
+
+def build_minimum_network_metadata(
+    v2: Optional[bool],
+    base_model: Optional[str],
+    network_module: str,
+    network_dim: str,
+    network_alpha: str,
+    network_args: Optional[dict],
+):
+    # old LoRA doesn't have base_model
+    metadata = {
+        SS_METADATA_KEY_NETWORK_MODULE: network_module,
+        SS_METADATA_KEY_NETWORK_DIM: network_dim,
+        SS_METADATA_KEY_NETWORK_ALPHA: network_alpha,
+    }
+    if v2 is not None:
+        metadata[SS_METADATA_KEY_V2] = v2
+    if base_model is not None:
+        metadata[SS_METADATA_KEY_BASE_MODEL_VERSION] = base_model
+    if network_args is not None:
+        metadata[SS_METADATA_KEY_NETWORK_ARGS] = json.dumps(network_args)
+    return metadata
+
+
+def get_sai_model_spec(
+    state_dict: dict,
+    args: argparse.Namespace,
+    sdxl: bool,
+    lora: bool,
+    textual_inversion: bool,
+    is_stable_diffusion_ckpt: Optional[bool] = None,  # None for TI and LoRA
+):
+    timestamp = time.time()
+
+    v2 = args.v2
+    v_parameterization = args.v_parameterization
+    reso = args.resolution
+
+    title = args.metadata_title if args.metadata_title is not None else args.output_name
+
+    if args.min_timestep is not None or args.max_timestep is not None:
+        min_time_step = args.min_timestep if args.min_timestep is not None else 0
+        max_time_step = args.max_timestep if args.max_timestep is not None else 1000
+        timesteps = (min_time_step, max_time_step)
+    else:
+        timesteps = None
+
+    metadata = sai_model_spec.build_metadata(
+        state_dict,
+        v2,
+        v_parameterization,
+        sdxl,
+        lora,
+        textual_inversion,
+        timestamp,
+        title=title,
+        reso=reso,
+        is_stable_diffusion_ckpt=is_stable_diffusion_ckpt,
+        author=args.metadata_author,
+        description=args.metadata_description,
+        license=args.metadata_license,
+        tags=args.metadata_tags,
+        timesteps=timesteps,
+        clip_skip=args.clip_skip,  # None or int
+    )
+    return metadata
+
+
 def add_sd_models_arguments(parser: argparse.ArgumentParser):
     # for pretrained models
     parser.add_argument("--v2", action="store_true", help="load Stable Diffusion v2.0 model / Stable Diffusion 2.0のモデルを読み込む")
@@ -2459,7 +2640,7 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
         "--optimizer_type",
         type=str,
         default="",
-        help="Optimizer to use / オプティマイザの種類: AdamW (default), AdamW8bit, Lion8bit, Lion, SGDNesterov, SGDNesterov8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, AdaFactor",
+        help="Optimizer to use / オプティマイザの種類: AdamW (default), AdamW8bit, PagedAdamW8bit, Lion8bit, PagedLion8bit, Lion, SGDNesterov, SGDNesterov8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, AdaFactor",
     )
 
     # backward compatibility
@@ -2662,7 +2843,9 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--mixed_precision", type=str, default="no", choices=["no", "fp16", "bf16"], help="use mixed precision / 混合精度を使う場合、その精度"
     )
     parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
-    parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
+    parser.add_argument(
+        "--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する"
+    )  # TODO move to SDXL training, because it is not supported by SD1/2
     parser.add_argument(
         "--clip_skip",
         type=int,
@@ -2690,6 +2873,12 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="name of tracker to use for logging, default is script-specific default name / ログ出力に使用するtrackerの名前、省略時はスクリプトごとのデフォルト名",
     )
     parser.add_argument(
+        "--log_tracker_config",
+        type=str,
+        default=None,
+        help="path to tracker config file to use for logging / ログ出力に使用するtrackerの設定ファイルのパス",
+    )
+    parser.add_argument(
         "--wandb_api_key",
         type=str,
         default=None,
@@ -2706,6 +2895,13 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         type=int,
         default=None,
         help="enable multires noise with this number of iterations (if enabled, around 6-10 is recommended) / Multires noiseを有効にしてこのイテレーション数を設定する（有効にする場合は6-10程度を推奨）",
+    )
+    parser.add_argument(
+        "--ip_noise_gamma",
+        type=float,
+        default=None,
+        help="enable input perturbation noise. used for regularization. recommended value: around 0.1 (from arxiv.org/abs/2301.11706) "
+        + "/  input perturbation noiseを有効にする。正則化に使用される。推奨値: 0.1程度 (arxiv.org/abs/2301.11706 より)",
     )
     # parser.add_argument(
     #     "--perlin_noise",
@@ -2724,6 +2920,11 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         type=float,
         default=None,
         help="add `latent mean absolute value * this value` to noise_offset (disabled if None, default) / latentの平均値の絶対値 * この値をnoise_offsetに加算する（Noneの場合は無効、デフォルト）",
+    )
+    parser.add_argument(
+        "--zero_terminal_snr",
+        action="store_true",
+        help="fix noise scheduler betas to enforce zero terminal SNR / noise schedulerのbetasを修正して、zero terminal SNRを強制する",
     )
     parser.add_argument(
         "--min_timestep",
@@ -2791,6 +2992,38 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--output_config", action="store_true", help="output command line args to given .toml file / 引数を.tomlファイルに出力する"
     )
 
+    # SAI Model spec
+    parser.add_argument(
+        "--metadata_title",
+        type=str,
+        default=None,
+        help="title for model metadata (default is output_name) / メタデータに書き込まれるモデルタイトル、省略時はoutput_name",
+    )
+    parser.add_argument(
+        "--metadata_author",
+        type=str,
+        default=None,
+        help="author name for model metadata / メタデータに書き込まれるモデル作者名",
+    )
+    parser.add_argument(
+        "--metadata_description",
+        type=str,
+        default=None,
+        help="description for model metadata / メタデータに書き込まれるモデル説明",
+    )
+    parser.add_argument(
+        "--metadata_license",
+        type=str,
+        default=None,
+        help="license for model metadata / メタデータに書き込まれるモデルライセンス",
+    )
+    parser.add_argument(
+        "--metadata_tags",
+        type=str,
+        default=None,
+        help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
+    )
+
     if support_dreambooth:
         # DreamBooth training
         parser.add_argument(
@@ -2800,7 +3033,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
 
 def verify_training_args(args: argparse.Namespace):
     if args.v_parameterization and not args.v2:
-        print("v_parameterization should be with v2 / v1でv_parameterizationを使用することは想定されていません")
+        print("v_parameterization should be with v2 not v1 or sdxl / v1やsdxlでv_parameterizationを使用することは想定されていません")
     if args.v2 and args.clip_skip is not None:
         print("v2 with clip_skip will be unexpected / v2でclip_skipを使用することは想定されていません")
 
@@ -2811,11 +3044,11 @@ def verify_training_args(args: argparse.Namespace):
         )
 
     # noise_offset, perlin_noise, multires_noise_iterations cannot be enabled at the same time
-    # Listを使って数えてもいいけど並べてしまえ
-    if args.noise_offset is not None and args.multires_noise_iterations is not None:
-        raise ValueError(
-            "noise_offset and multires_noise_iterations cannot be enabled at the same time / noise_offsetとmultires_noise_iterationsを同時に有効にできません"
-        )
+    # # Listを使って数えてもいいけど並べてしまえ
+    # if args.noise_offset is not None and args.multires_noise_iterations is not None:
+    #     raise ValueError(
+    #         "noise_offset and multires_noise_iterations cannot be enabled at the same time / noise_offsetとmultires_noise_iterationsを同時に有効にできません"
+    #     )
     # if args.noise_offset is not None and args.perlin_noise is not None:
     #     raise ValueError("noise_offset and perlin_noise cannot be enabled at the same time / noise_offsetとperlin_noiseは同時に有効にできません")
     # if args.perlin_noise is not None and args.multires_noise_iterations is not None:
@@ -2829,6 +3062,17 @@ def verify_training_args(args: argparse.Namespace):
     if args.scale_v_pred_loss_like_noise_pred and not args.v_parameterization:
         raise ValueError(
             "scale_v_pred_loss_like_noise_pred can be enabled only with v_parameterization / scale_v_pred_loss_like_noise_predはv_parameterizationが有効なときのみ有効にできます"
+        )
+
+    if args.v_pred_like_loss and args.v_parameterization:
+        raise ValueError(
+            "v_pred_like_loss cannot be enabled with v_parameterization / v_pred_like_lossはv_parameterizationが有効なときには有効にできません"
+        )
+
+    if args.zero_terminal_snr and not args.v_parameterization:
+        print(
+            f"zero_terminal_snr is enabled, but v_parameterization is not enabled. training will be unexpected"
+            + " / zero_terminal_snrが有効ですが、v_parameterizationが有効ではありません。学習結果は想定外になる可能性があります"
         )
 
 
@@ -2854,6 +3098,18 @@ def add_dataset_arguments(
         type=int,
         default=0,
         help="keep heading N tokens when shuffling caption tokens (token means comma separated strings) / captionのシャッフル時に、先頭からこの個数のトークンをシャッフルしないで残す（トークンはカンマ区切りの各部分を意味する）",
+    )
+    parser.add_argument(
+        "--caption_prefix",
+        type=str,
+        default=None,
+        help="prefix for caption text / captionのテキストの先頭に付ける文字列",
+    )
+    parser.add_argument(
+        "--caption_suffix",
+        type=str,
+        default=None,
+        help="suffix for caption text / captionのテキストの末尾に付ける文字列",
     )
     parser.add_argument("--color_aug", action="store_true", help="enable weak color augmentation / 学習時に色合いのaugmentationを有効にする")
     parser.add_argument("--flip_aug", action="store_true", help="enable horizontal flip augmentation / 学習時に左右反転のaugmentationを有効にする")
@@ -3094,7 +3350,7 @@ def resume_from_local_or_hf_if_specified(accelerator, args):
 
 
 def get_optimizer(args, trainable_params):
-    # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, Lion8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
+    # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW8bit, Lion8bit, PagedLion8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
 
     optimizer_type = args.optimizer_type
     if args.use_8bit_adam:
@@ -3138,32 +3394,9 @@ def get_optimizer(args, trainable_params):
     # print("optkwargs:", optimizer_kwargs)
 
     lr = args.learning_rate
+    optimizer = None
 
-    if optimizer_type == "AdamW8bit".lower():
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError("No bitsand bytes / bitsandbytesがインストールされていないようです")
-        print(f"use 8-bit AdamW optimizer | {optimizer_kwargs}")
-        optimizer_class = bnb.optim.AdamW8bit
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
-
-    elif optimizer_type == "SGDNesterov8bit".lower():
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError("No bitsand bytes / bitsandbytesがインストールされていないようです")
-        print(f"use 8-bit SGD with Nesterov optimizer | {optimizer_kwargs}")
-        if "momentum" not in optimizer_kwargs:
-            print(
-                f"8-bit SGD with Nesterov must be with momentum, set momentum to 0.9 / 8-bit SGD with Nesterovはmomentum指定が必須のため0.9に設定します"
-            )
-            optimizer_kwargs["momentum"] = 0.9
-
-        optimizer_class = bnb.optim.SGD8bit
-        optimizer = optimizer_class(trainable_params, lr=lr, nesterov=True, **optimizer_kwargs)
-
-    elif optimizer_type == "Lion".lower():
+    if optimizer_type == "Lion".lower():
         try:
             import lion_pytorch
         except ImportError:
@@ -3172,19 +3405,52 @@ def get_optimizer(args, trainable_params):
         optimizer_class = lion_pytorch.Lion
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
-    elif optimizer_type == "Lion8bit".lower():
+    elif optimizer_type.endswith("8bit".lower()):
         try:
             import bitsandbytes as bnb
         except ImportError:
             raise ImportError("No bitsandbytes / bitsandbytesがインストールされていないようです")
 
-        print(f"use 8-bit Lion optimizer | {optimizer_kwargs}")
-        try:
-            optimizer_class = bnb.optim.Lion8bit
-        except AttributeError:
-            raise AttributeError(
-                "No Lion8bit. The version of bitsandbytes installed seems to be old. Please install 0.38.0 or later. / Lion8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.38.0以上をインストールしてください"
-            )
+        if optimizer_type == "AdamW8bit".lower():
+            print(f"use 8-bit AdamW optimizer | {optimizer_kwargs}")
+            optimizer_class = bnb.optim.AdamW8bit
+            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
+        elif optimizer_type == "SGDNesterov8bit".lower():
+            print(f"use 8-bit SGD with Nesterov optimizer | {optimizer_kwargs}")
+            if "momentum" not in optimizer_kwargs:
+                print(
+                    f"8-bit SGD with Nesterov must be with momentum, set momentum to 0.9 / 8-bit SGD with Nesterovはmomentum指定が必須のため0.9に設定します"
+                )
+                optimizer_kwargs["momentum"] = 0.9
+
+            optimizer_class = bnb.optim.SGD8bit
+            optimizer = optimizer_class(trainable_params, lr=lr, nesterov=True, **optimizer_kwargs)
+
+        elif optimizer_type == "Lion8bit".lower():
+            print(f"use 8-bit Lion optimizer | {optimizer_kwargs}")
+            try:
+                optimizer_class = bnb.optim.Lion8bit
+            except AttributeError:
+                raise AttributeError(
+                    "No Lion8bit. The version of bitsandbytes installed seems to be old. Please install 0.38.0 or later. / Lion8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.38.0以上をインストールしてください"
+                )
+        elif optimizer_type == "PagedAdamW8bit".lower():
+            print(f"use 8-bit PagedAdamW optimizer | {optimizer_kwargs}")
+            try:
+                optimizer_class = bnb.optim.PagedAdamW8bit
+            except AttributeError:
+                raise AttributeError(
+                    "No PagedAdamW8bit. The version of bitsandbytes installed seems to be old. Please install 0.39.0 or later. / PagedAdamW8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.39.0以上をインストールしてください"
+                )
+        elif optimizer_type == "PagedLion8bit".lower():
+            print(f"use 8-bit Paged Lion optimizer | {optimizer_kwargs}")
+            try:
+                optimizer_class = bnb.optim.PagedLion8bit
+            except AttributeError:
+                raise AttributeError(
+                    "No PagedLion8bit. The version of bitsandbytes installed seems to be old. Please install 0.39.0 or later. / PagedLion8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.39.0以上をインストールしてください"
+                )
 
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
@@ -3316,7 +3582,7 @@ def get_optimizer(args, trainable_params):
         optimizer_class = torch.optim.AdamW
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
-    else:
+    if optimizer is None:
         # 任意のoptimizerを使う
         optimizer_type = args.optimizer_type  # lowerでないやつ（微妙）
         print(f"use {optimizer_type} | {optimizer_kwargs}")
@@ -3336,10 +3602,8 @@ def get_optimizer(args, trainable_params):
     return optimizer_name, optimizer_args, optimizer
 
 
-# Monkeypatch newer get_scheduler() function overridng current version of diffusers.optimizer.get_scheduler
-# code is taken from https://github.com/huggingface/diffusers diffusers.optimizer, commit d87cc15977b87160c30abaace3894e802ad9e1e6
-# Which is a newer release of diffusers than currently packaged with sd-scripts
-# This code can be removed when newer diffusers version (v0.12.1 or greater) is tested and implemented to sd-scripts
+# Modified version of get_scheduler() function from diffusers.optimizer.get_scheduler
+# Add some checking and features to the original function.
 
 
 def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
@@ -3348,7 +3612,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     """
     name = args.lr_scheduler
     num_warmup_steps: Optional[int] = args.lr_warmup_steps
-    num_training_steps = args.max_train_steps * num_processes # * args.gradient_accumulation_steps
+    num_training_steps = args.max_train_steps * num_processes  # * args.gradient_accumulation_steps
     num_cycles = args.lr_scheduler_num_cycles
     power = args.lr_scheduler_power
 
@@ -3356,19 +3620,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     if args.lr_scheduler_args is not None and len(args.lr_scheduler_args) > 0:
         for arg in args.lr_scheduler_args:
             key, value = arg.split("=")
-
             value = ast.literal_eval(value)
-            # value = value.split(",")
-            # for i in range(len(value)):
-            #     if value[i].lower() == "true" or value[i].lower() == "false":
-            #         value[i] = value[i].lower() == "true"
-            #     else:
-            #         value[i] = ast.literal_eval(value[i])
-            # if len(value) == 1:
-            #     value = value[0]
-            # else:
-            #     value = list(value)  # some may use list?
-
             lr_scheduler_kwargs[key] = value
 
     def wrap_check_needless_num_warmup_steps(return_vals):
@@ -3400,15 +3652,19 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
 
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
+
     if name == SchedulerType.CONSTANT:
-        return wrap_check_needless_num_warmup_steps(schedule_func(optimizer))
+        return wrap_check_needless_num_warmup_steps(schedule_func(optimizer, **lr_scheduler_kwargs))
+
+    if name == SchedulerType.PIECEWISE_CONSTANT:
+        return schedule_func(optimizer, **lr_scheduler_kwargs)  # step_rules and last_epoch are given as kwargs
 
     # All other schedulers require `num_warmup_steps`
     if num_warmup_steps is None:
         raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
 
     if name == SchedulerType.CONSTANT_WITH_WARMUP:
-        return schedule_func(optimizer, num_warmup_steps=num_warmup_steps)
+        return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, **lr_scheduler_kwargs)
 
     # All other schedulers require `num_training_steps`
     if num_training_steps is None:
@@ -3416,13 +3672,19 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
 
     if name == SchedulerType.COSINE_WITH_RESTARTS:
         return schedule_func(
-            optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, num_cycles=num_cycles
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            num_cycles=num_cycles,
+            **lr_scheduler_kwargs,
         )
 
     if name == SchedulerType.POLYNOMIAL:
-        return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, power=power)
+        return schedule_func(
+            optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, power=power, **lr_scheduler_kwargs
+        )
 
-    return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
+    return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, **lr_scheduler_kwargs)
 
 
 def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
@@ -3539,7 +3801,7 @@ def prepare_dtype(args: argparse.Namespace):
 
 def _load_target_model(args: argparse.Namespace, weight_dtype, device="cpu", unet_use_linear_projection_in_v2=False):
     name_or_path = args.pretrained_model_name_or_path
-    name_or_path = os.readlink(name_or_path) if os.path.islink(name_or_path) else name_or_path
+    name_or_path = os.path.realpath(name_or_path) if os.path.islink(name_or_path) else name_or_path
     load_stable_diffusion_format = os.path.isfile(name_or_path)  # determine SD or Diffusers
     if load_stable_diffusion_format:
         print(f"load StableDiffusion checkpoint: {name_or_path}")
@@ -3678,8 +3940,58 @@ def get_hidden_states(args: argparse.Namespace, input_ids, tokenizer, text_encod
     return encoder_hidden_states
 
 
+def pool_workaround(
+    text_encoder: CLIPTextModelWithProjection, last_hidden_state: torch.Tensor, input_ids: torch.Tensor, eos_token_id: int
+):
+    r"""
+    workaround for CLIP's pooling bug: it returns the hidden states for the max token id as the pooled output
+    instead of the hidden states for the EOS token
+    If we use Textual Inversion, we need to use the hidden states for the EOS token as the pooled output
+
+    Original code from CLIP's pooling function:
+
+    \# text_embeds.shape = [batch_size, sequence_length, transformer.width]
+    \# take features from the eot embedding (eot_token is the highest number in each sequence)
+    \# casting to torch.int for onnx compatibility: argmax doesn't support int64 inputs with opset 14
+    pooled_output = last_hidden_state[
+        torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
+        input_ids.to(dtype=torch.int, device=last_hidden_state.device).argmax(dim=-1),
+    ]
+    """
+
+    # input_ids: b*n,77
+    # find index for EOS token
+
+    # Following code is not working if one of the input_ids has multiple EOS tokens (very odd case)
+    # eos_token_index = torch.where(input_ids == eos_token_id)[1]
+    # eos_token_index = eos_token_index.to(device=last_hidden_state.device)
+
+    # Create a mask where the EOS tokens are
+    eos_token_mask = (input_ids == eos_token_id).int()
+
+    # Use argmax to find the last index of the EOS token for each element in the batch
+    eos_token_index = torch.argmax(eos_token_mask, dim=1)  # this will be 0 if there is no EOS token, it's fine
+    eos_token_index = eos_token_index.to(device=last_hidden_state.device)
+
+    # get hidden states for EOS token
+    pooled_output = last_hidden_state[torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device), eos_token_index]
+
+    # apply projection: projection may be of different dtype than last_hidden_state
+    pooled_output = text_encoder.text_projection(pooled_output.to(text_encoder.text_projection.weight.dtype))
+    pooled_output = pooled_output.to(last_hidden_state.dtype)
+
+    return pooled_output
+
+
 def get_hidden_states_sdxl(
-    max_token_length, input_ids1, input_ids2, tokenizer1, tokenizer2, text_encoder1, text_encoder2, weight_dtype=None
+    max_token_length: int,
+    input_ids1: torch.Tensor,
+    input_ids2: torch.Tensor,
+    tokenizer1: CLIPTokenizer,
+    tokenizer2: CLIPTokenizer,
+    text_encoder1: CLIPTextModel,
+    text_encoder2: CLIPTextModelWithProjection,
+    weight_dtype: Optional[str] = None,
 ):
     # input_ids: b,n,77 -> b*n, 77
     b_size = input_ids1.size()[0]
@@ -3693,7 +4005,9 @@ def get_hidden_states_sdxl(
     # text_encoder2
     enc_out = text_encoder2(input_ids2, output_hidden_states=True, return_dict=True)
     hidden_states2 = enc_out["hidden_states"][-2]  # penuultimate layer
-    pool2 = enc_out["text_embeds"]
+
+    # pool2 = enc_out["text_embeds"]
+    pool2 = pool_workaround(text_encoder2, enc_out["last_hidden_state"], input_ids2, tokenizer2.eos_token_id)
 
     # b*n, 77, 768 or 1280 -> b, n*77, 768 or 1280
     n_size = 1 if max_token_length is None else max_token_length // 75
@@ -3794,8 +4108,9 @@ def save_sd_model_on_epoch_end_or_stepwise(
     vae,
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
+        sai_metadata = get_sai_model_spec(None, args, False, False, False, is_stable_diffusion_ckpt=True)
         model_util.save_stable_diffusion_checkpoint(
-            args.v2, ckpt_file, text_encoder, unet, src_path, epoch_no, global_step, save_dtype, vae
+            args.v2, ckpt_file, text_encoder, unet, src_path, epoch_no, global_step, sai_metadata, save_dtype, vae
         )
 
     def diffusers_saver(out_dir):
@@ -3975,8 +4290,9 @@ def save_sd_model_on_train_end(
     vae,
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
+        sai_metadata = get_sai_model_spec(None, args, False, False, False, is_stable_diffusion_ckpt=True)
         model_util.save_stable_diffusion_checkpoint(
-            args.v2, ckpt_file, text_encoder, unet, src_path, epoch_no, global_step, save_dtype, vae
+            args.v2, ckpt_file, text_encoder, unet, src_path, epoch_no, global_step, sai_metadata, save_dtype, vae
         )
 
     def diffusers_saver(out_dir):
@@ -4027,7 +4343,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
     noise = torch.randn_like(latents, device=latents.device)
     if args.noise_offset:
         noise = custom_train_functions.apply_noise_offset(latents, noise, args.noise_offset, args.adaptive_noise_scale)
-    elif args.multires_noise_iterations:
+    if args.multires_noise_iterations:
         noise = custom_train_functions.pyramid_noise_like(
             noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
         )
@@ -4042,7 +4358,10 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
-    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+    if args.ip_noise_gamma:
+        noisy_latents = noise_scheduler.add_noise(latents, noise + args.ip_noise_gamma * torch.randn_like(latents), timesteps)
+    else:
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
     return noise, noisy_latents, timesteps
 

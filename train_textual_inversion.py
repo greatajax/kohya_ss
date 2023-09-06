@@ -3,6 +3,7 @@ import gc
 import math
 import os
 from multiprocessing import Value
+import toml
 
 from tqdm import tqdm
 import torch
@@ -23,6 +24,7 @@ from library.custom_train_functions import (
     apply_snr_weight,
     prepare_scheduler_for_custom_training,
     scale_v_prediction_loss_like_noise_prediction,
+    add_v_prediction_like_loss,
 )
 
 imagenet_templates_small = [
@@ -81,6 +83,7 @@ imagenet_style_templates_small = [
 class TextualInversionTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215
+        self.is_sdxl = False
 
     def assert_extra_args(self, args, train_dataset_group):
         pass
@@ -111,7 +114,7 @@ class TextualInversionTrainer:
             accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement
         )
 
-    def save_weights(self, file, updated_embs, save_dtype):
+    def save_weights(self, file, updated_embs, save_dtype, metadata):
         state_dict = {"emb_params": updated_embs[0]}
 
         if save_dtype is not None:
@@ -123,7 +126,7 @@ class TextualInversionTrainer:
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import save_file
 
-            save_file(state_dict, file)
+            save_file(state_dict, file, metadata)
         else:
             torch.save(state_dict, file)  # can be loaded in Web UI
 
@@ -343,7 +346,8 @@ class TextualInversionTrainer:
 
         # モデルに xformers とか memory efficient attention を組み込む
         train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
-        vae.set_use_memory_efficient_attention_xformers(args.xformers)
+        if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
+            vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
         # 学習を準備する
         if cache_latents:
@@ -487,9 +491,16 @@ class TextualInversionTrainer:
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
         )
         prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
+        if args.zero_terminal_snr:
+            custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
         if accelerator.is_main_process:
-            accelerator.init_trackers("textual_inversion" if args.log_tracker_name is None else args.log_tracker_name)
+            init_kwargs = {}
+            if args.log_tracker_config is not None:
+                init_kwargs = toml.load(args.log_tracker_config)
+            accelerator.init_trackers(
+                "textual_inversion" if args.log_tracker_name is None else args.log_tracker_name, init_kwargs=init_kwargs
+            )
 
         # function for saving/removing
         def save_model(ckpt_name, embs_list, steps, epoch_no, force_sync_upload=False):
@@ -497,7 +508,10 @@ class TextualInversionTrainer:
             ckpt_file = os.path.join(args.output_dir, ckpt_name)
 
             accelerator.print(f"\nsaving checkpoint: {ckpt_file}")
-            self.save_weights(ckpt_file, embs_list, save_dtype)
+
+            sai_metadata = train_util.get_sai_model_spec(None, args, self.is_sdxl, False, True)
+
+            self.save_weights(ckpt_file, embs_list, save_dtype, sai_metadata)
             if args.huggingface_repo_id is not None:
                 huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -559,6 +573,8 @@ class TextualInversionTrainer:
                         loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma)
                     if args.scale_v_pred_loss_like_noise_pred:
                         loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                    if args.v_pred_like_loss:
+                        loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 

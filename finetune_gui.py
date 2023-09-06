@@ -17,13 +17,14 @@ from library.common_gui import (
     update_my_data,
     check_if_model_exist,
     SaveConfigFile,
-    save_to_file
+    save_to_file,
 )
 from library.class_configuration_file import ConfigurationFile
 from library.class_source_model import SourceModel
 from library.class_basic_training import BasicTraining
 from library.class_advanced_training import AdvancedTraining
 from library.class_sdxl_parameters import SDXLParameters
+from library.class_command_executor import CommandExecutor
 from library.tensorboard_gui import (
     gradio_tensorboard,
     start_tensorboard,
@@ -33,9 +34,13 @@ from library.utilities import utilities_tab
 from library.class_sample_images import SampleImages, run_cmd_sample
 
 from library.custom_logging import setup_logging
+from localization_ext import add_javascript
 
 # Set up logging
 log = setup_logging()
+
+# Setup command executor
+executor = CommandExecutor()
 
 # from easygui import msgbox
 
@@ -89,7 +94,7 @@ def save_configuration(
     save_state,
     resume,
     gradient_checkpointing,
-    gradient_accumulation_steps,
+    gradient_accumulation_steps,block_lr,
     mem_eff_attn,
     shuffle_caption,
     output_name,
@@ -107,10 +112,12 @@ def save_configuration(
     bucket_no_upscale,
     random_crop,
     bucket_reso_steps,
+    v_pred_like_loss,
     caption_dropout_every_n_epochs,
     caption_dropout_rate,
     optimizer,
     optimizer_args,
+    lr_scheduler_args,
     noise_offset_type,
     noise_offset,
     adaptive_noise_scale,
@@ -162,7 +169,11 @@ def save_configuration(
     if not os.path.exists(destination_directory):
         os.makedirs(destination_directory)
 
-    SaveConfigFile(parameters=parameters, file_path=file_path, exclusion=['file_path', 'save_as'])
+    SaveConfigFile(
+        parameters=parameters,
+        file_path=file_path,
+        exclusion=['file_path', 'save_as'],
+    )
 
     return file_path
 
@@ -209,7 +220,7 @@ def open_configuration(
     save_state,
     resume,
     gradient_checkpointing,
-    gradient_accumulation_steps,
+    gradient_accumulation_steps,block_lr,
     mem_eff_attn,
     shuffle_caption,
     output_name,
@@ -227,10 +238,12 @@ def open_configuration(
     bucket_no_upscale,
     random_crop,
     bucket_reso_steps,
+    v_pred_like_loss,
     caption_dropout_every_n_epochs,
     caption_dropout_rate,
     optimizer,
     optimizer_args,
+    lr_scheduler_args,
     noise_offset_type,
     noise_offset,
     adaptive_noise_scale,
@@ -326,7 +339,7 @@ def train_model(
     save_state,
     resume,
     gradient_checkpointing,
-    gradient_accumulation_steps,
+    gradient_accumulation_steps,block_lr,
     mem_eff_attn,
     shuffle_caption,
     output_name,
@@ -344,10 +357,12 @@ def train_model(
     bucket_no_upscale,
     random_crop,
     bucket_reso_steps,
+    v_pred_like_loss,
     caption_dropout_every_n_epochs,
     caption_dropout_rate,
     optimizer,
     optimizer_args,
+    lr_scheduler_args,
     noise_offset_type,
     noise_offset,
     adaptive_noise_scale,
@@ -374,7 +389,7 @@ def train_model(
 ):
     # Get list of function parameters and values
     parameters = list(locals().items())
-    
+
     print_only_bool = True if print_only.get('label') == 'True' else False
     log.info(f'Start Finetuning...')
 
@@ -443,6 +458,11 @@ def train_model(
         #     run_cmd += f' --flip_aug'
         if full_path:
             run_cmd += f' --full_path'
+        if sdxl_no_half_vae:
+            log.info(
+                'Using mixed_precision = no because no half vae is selected...'
+            )
+            run_cmd += f' --mixed_precision="no"'
 
         log.info(run_cmd)
 
@@ -525,18 +545,17 @@ def train_model(
         run_cmd += f' --save_model_as={save_model_as}'
     if int(gradient_accumulation_steps) > 1:
         run_cmd += f' --gradient_accumulation_steps={int(gradient_accumulation_steps)}'
-    # if save_state:
-    #     run_cmd += ' --save_state'
-    # if not resume == '':
-    #     run_cmd += f' --resume={resume}'
+    if not block_lr == '':
+        run_cmd += f' --block_lr="{block_lr}"'
+    
     if not output_name == '':
         run_cmd += f' --output_name="{output_name}"'
     if int(max_token_length) > 75:
         run_cmd += f' --max_token_length={max_token_length}'
-        
+
     if sdxl_cache_text_encoder_outputs:
         run_cmd += f' --cache_text_encoder_outputs'
-        
+
     if sdxl_no_half_vae:
         run_cmd += f' --no_half_vae'
 
@@ -555,6 +574,7 @@ def train_model(
         cache_latents_to_disk=cache_latents_to_disk,
         optimizer=optimizer,
         optimizer_args=optimizer_args,
+        lr_scheduler_args=lr_scheduler_args,
     )
 
     run_cmd += run_cmd_advanced_training(
@@ -577,6 +597,7 @@ def train_model(
         bucket_no_upscale=bucket_no_upscale,
         random_crop=random_crop,
         bucket_reso_steps=bucket_reso_steps,
+        v_pred_like_loss=v_pred_like_loss,
         caption_dropout_every_n_epochs=caption_dropout_every_n_epochs,
         caption_dropout_rate=caption_dropout_rate,
         noise_offset_type=noise_offset_type,
@@ -610,25 +631,28 @@ def train_model(
             'Here is the trainer command as a reference. It will not be executed:\n'
         )
         print(run_cmd)
-        
+
         save_to_file(run_cmd)
     else:
         # Saving config file for model
         current_datetime = datetime.now()
-        formatted_datetime = current_datetime.strftime("%Y%m%d-%H%M%S")
-        file_path = os.path.join(output_dir, f'{output_name}_{formatted_datetime}.json')
-        
+        formatted_datetime = current_datetime.strftime('%Y%m%d-%H%M%S')
+        file_path = os.path.join(
+            output_dir, f'{output_name}_{formatted_datetime}.json'
+        )
+
         log.info(f'Saving training config to {file_path}...')
 
-        SaveConfigFile(parameters=parameters, file_path=file_path, exclusion=['file_path', 'save_as', 'headless', 'print_only'])
-        
+        SaveConfigFile(
+            parameters=parameters,
+            file_path=file_path,
+            exclusion=['file_path', 'save_as', 'headless', 'print_only'],
+        )
+
         log.info(run_cmd)
 
         # Run the command
-        if os.name == 'posix':
-            os.system(run_cmd)
-        else:
-            subprocess.run(run_cmd)
+        executor.execute_command(run_cmd=run_cmd)
 
         # check if output_dir/last is a folder... therefore it is a diffuser model
         last_dir = pathlib.Path(f'{output_dir}/{output_name}')
@@ -772,7 +796,8 @@ def finetune_tab(headless=False):
             with gr.Accordion('Advanced parameters', open=False):
                 with gr.Row():
                     caption_metadata_filename = gr.Textbox(
-                        label='Caption metadata filename', value='meta_cap.json'
+                        label='Caption metadata filename',
+                        value='meta_cap.json',
                     )
                     latent_metadata_filename = gr.Textbox(
                         label='Latent metadata filename', value='meta_lat.json'
@@ -783,39 +808,58 @@ def finetune_tab(headless=False):
                         label='Weighted captions', value=False
                     )
         with gr.Tab('Parameters'):
-            basic_training = BasicTraining(learning_rate_value='1e-5', finetuning=True)
-            
-            # Add SDXL Parameters
-            sdxl_params = SDXLParameters(source_model.sdxl_checkbox)
-            
-            with gr.Row():
-                dataset_repeats = gr.Textbox(label='Dataset repeats', value=40)
-                train_text_encoder = gr.Checkbox(
-                    label='Train text encoder', value=True
+            with gr.Tab('Basic', elem_id='basic_tab'):
+                basic_training = BasicTraining(
+                    learning_rate_value='1e-5', finetuning=True
                 )
-                full_bf16 = gr.Checkbox(
-                    label='Full bf16', value = False
-                )
-            with gr.Accordion('Advanced parameters', open=False):
+
+                # Add SDXL Parameters
+                sdxl_params = SDXLParameters(source_model.sdxl_checkbox)
+
+                with gr.Row():
+                    dataset_repeats = gr.Textbox(
+                        label='Dataset repeats', value=40
+                    )
+                    train_text_encoder = gr.Checkbox(
+                        label='Train text encoder', value=True
+                    )
+
+            with gr.Tab('Advanced', elem_id='advanced_tab'):
                 with gr.Row():
                     gradient_accumulation_steps = gr.Number(
                         label='Gradient accumulate steps', value='1'
                     )
-                advanced_training = AdvancedTraining(headless=headless, finetuning=True)
+                    block_lr = gr.Textbox(
+                        label='Block LR',
+                        placeholder='(Optional)',
+                        info='Specify the different learning rates for each U-Net block. Specify 23 values separated by commas like 1e-3,1e-3 ... 1e-3',
+                    )
+                advanced_training = AdvancedTraining(
+                    headless=headless, finetuning=True
+                )
                 advanced_training.color_aug.change(
                     color_aug_changed,
                     inputs=[advanced_training.color_aug],
-                    outputs=[basic_training.cache_latents],  # Not applicable to fine_tune.py
+                    outputs=[
+                        basic_training.cache_latents
+                    ],  # Not applicable to fine_tune.py
                 )
 
-            sample = SampleImages()
+            with gr.Tab('Samples', elem_id='samples_tab'):
+                sample = SampleImages()
 
-        button_run = gr.Button('Train model', variant='primary')
+        with gr.Row():
+            button_run = gr.Button('Start training', variant='primary')
+
+            button_stop_training = gr.Button('Stop training')
 
         button_print = gr.Button('Print training command')
 
         # Setup gradio tensorboard buttons
-        button_start_tensorboard, button_stop_tensorboard = gradio_tensorboard()
+        (
+            button_start_tensorboard,
+            button_stop_tensorboard,
+        ) = gradio_tensorboard()
 
         button_start_tensorboard.click(
             start_tensorboard,
@@ -856,7 +900,7 @@ def finetune_tab(headless=False):
             basic_training.seed,
             basic_training.num_cpu_threads_per_process,
             train_text_encoder,
-            full_bf16,
+            advanced_training.full_bf16,
             create_caption,
             create_buckets,
             source_model.save_model_as,
@@ -867,11 +911,12 @@ def finetune_tab(headless=False):
             advanced_training.resume,
             advanced_training.gradient_checkpointing,
             gradient_accumulation_steps,
+            block_lr,
             advanced_training.mem_eff_attn,
             advanced_training.shuffle_caption,
             output_name,
             advanced_training.max_token_length,
-            advanced_training.max_train_epochs,
+            basic_training.max_train_epochs,
             advanced_training.max_data_loader_n_workers,
             advanced_training.full_fp16,
             advanced_training.color_aug,
@@ -884,10 +929,12 @@ def finetune_tab(headless=False):
             advanced_training.bucket_no_upscale,
             advanced_training.random_crop,
             advanced_training.bucket_reso_steps,
+            advanced_training.v_pred_like_loss,
             advanced_training.caption_dropout_every_n_epochs,
             advanced_training.caption_dropout_rate,
             basic_training.optimizer,
             basic_training.optimizer_args,
+            basic_training.lr_scheduler_args,
             advanced_training.noise_offset_type,
             advanced_training.noise_offset,
             advanced_training.adaptive_noise_scale,
@@ -918,6 +965,8 @@ def finetune_tab(headless=False):
             inputs=[dummy_headless] + [dummy_db_false] + settings_list,
             show_progress=False,
         )
+
+        button_stop_training.click(executor.kill_command)
 
         button_print.click(
             train_model,
@@ -952,19 +1001,22 @@ def finetune_tab(headless=False):
             outputs=[config.config_file_name],
             show_progress=False,
         )
-        
+
     with gr.Tab('Guides'):
         gr.Markdown(
             'This section provide Various Finetuning guides and information...'
         )
         top_level_path = './docs/Finetuning/top_level.md'
         if os.path.exists(top_level_path):
-            with open(os.path.join(top_level_path), 'r', encoding='utf8') as file:
+            with open(
+                os.path.join(top_level_path), 'r', encoding='utf8'
+            ) as file:
                 guides_top_level = file.read() + '\n'
         gr.Markdown(guides_top_level)
 
 
 def UI(**kwargs):
+    add_javascript(kwargs.get('language'))
     css = ''
 
     headless = kwargs.get('headless', False)
@@ -1036,6 +1088,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '--headless', action='store_true', help='Is the server headless'
     )
+    parser.add_argument(
+        '--language', type=str, default=None, help='Set custom language'
+    )
 
     args = parser.parse_args()
 
@@ -1047,4 +1102,5 @@ if __name__ == '__main__':
         share=args.share,
         listen=args.listen,
         headless=args.headless,
+        language=args.language,
     )

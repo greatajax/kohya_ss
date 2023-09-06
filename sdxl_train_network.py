@@ -8,6 +8,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.vae_scale_factor = sdxl_model_util.VAE_SCALE_FACTOR
+        self.is_sdxl = True
 
     def assert_extra_args(self, args, train_dataset_group):
         super().assert_extra_args(args, train_dataset_group)
@@ -22,6 +23,8 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             args.network_train_unet_only or not args.cache_text_encoder_outputs
         ), "network for Text Encoder cannot be trained with caching Text Encoder outputs / Text Encoderの出力をキャッシュしながらText Encoderのネットワークを学習することはできません"
 
+        train_dataset_group.verify_bucket_reso_steps(32)
+
     def load_target_model(self, args, weight_dtype, accelerator):
         (
             load_stable_diffusion_format,
@@ -31,13 +34,13 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             unet,
             logit_scale,
             ckpt_info,
-        ) = sdxl_train_util.load_target_model(args, accelerator, sdxl_model_util.MODEL_VERSION_SDXL_BASE_V0_9, weight_dtype)
+        ) = sdxl_train_util.load_target_model(args, accelerator, sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, weight_dtype)
 
         self.load_stable_diffusion_format = load_stable_diffusion_format
         self.logit_scale = logit_scale
         self.ckpt_info = ckpt_info
 
-        return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V0_9, [text_encoder1, text_encoder2], vae, unet
+        return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, [text_encoder1, text_encoder2], vae, unet
 
     def load_tokenizer(self, args):
         tokenizer = sdxl_train_util.load_tokenizers(args)
@@ -133,7 +136,6 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             # assert ((encoder_hidden_states2.to("cpu") - ehs2.to(dtype=weight_dtype)).abs().max() > 1e-2).sum() <= b_size * 2
             # assert ((pool2.to("cpu") - p2.to(dtype=weight_dtype)).abs().max() > 1e-2).sum() <= b_size * 2
             # print("text encoder outputs verified")
-
 
         return encoder_hidden_states1, encoder_hidden_states2, pool2
 

@@ -55,22 +55,69 @@ The GUI allows you to set the training parameters and generate and run the requi
 
 [![LoRA Part 2 Tutorial](https://img.youtube.com/vi/k5imq01uvUY/0.jpg)](https://www.youtube.com/watch?v=k5imq01uvUY)
 
-Newer Tutorial: [Generate Studio Quality Realistic Photos By Kohya LoRA Stable Diffusion Training](https://www.youtube.com/watch?v=TpuDOsuKIBo):
-The scripts are tested with PyTorch 1.12.1 and 2.0.1, Diffusers 0.17.1.
+[**Generate Studio Quality Realistic Photos By Kohya LoRA Stable Diffusion Training - Full Tutorial**](https://youtu.be/TpuDOsuKIBo)
 
-[![Newer Tutorial: Generate Studio Quality Realistic Photos By Kohya LoRA Stable Diffusion Training](https://user-images.githubusercontent.com/19240467/235306147-85dd8126-f397-406b-83f2-368927fa0281.png)](https://www.youtube.com/watch?v=TpuDOsuKIBo)
+[![image](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/QA9woGfjeql37J9JepbrW.png)](https://youtu.be/TpuDOsuKIBo)
 
-Newer Tutorial: [How To Install And Use Kohya LoRA GUI / Web UI on RunPod IO](https://www.youtube.com/watch?v=3uzCNrQao3o):
+[**First Ever SDXL Training With Kohya LoRA - Stable Diffusion XL Training Will Replace Older Models**](https://youtu.be/AY6DMBCIZ3A)
 
-[![How To Install And Use Kohya LoRA GUI / Web UI on RunPod IO With Stable Diffusion & Automatic1111](https://github-production-user-asset-6210df.s3.amazonaws.com/19240467/238678226-0c9c3f7d-c308-4793-b790-999fdc271372.png)](https://www.youtube.com/watch?v=3uzCNrQao3o)
+[![image](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/mG0CvKAzb8o29nr5ye0Br.png)](https://youtu.be/AY6DMBCIZ3A)
 
-First SDXL Tutorial: [First Ever SDXL Training With Kohya LoRA - Stable Diffusion XL Training Will Replace Older Models](https://youtu.be/AY6DMBCIZ3A):
+[**Become A Master Of SDXL Training With Kohya SS LoRAs - Combine Power Of Automatic1111 & SDXL LoRAs**](https://youtu.be/sBFGitIvD2A)
 
-[![First Ever SDXL Training With Kohya LoRA - Stable Diffusion XL Training Will Replace Older Models](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/mG0CvKAzb8o29nr5ye0Br.png)](https://youtu.be/AY6DMBCIZ3A)
+[![image](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/rXbRquLxFaDGaGlkl-SUp.png)](https://youtu.be/sBFGitIvD2A)
+
+[**How To Do SDXL LoRA Training On RunPod With Kohya SS GUI Trainer & Use LoRAs With Automatic1111 UI**](https://youtu.be/-xEwaQ54DI4)
+
+[![image](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/-BQQRjP9Maht_n4UHxgBJ.png)](https://youtu.be/-xEwaQ54DI4)
+
+[**How To Do SDXL LoRA Training On RunPod With Kohya SS GUI Trainer & Use LoRAs With Automatic1111 UI**](https://youtu.be/JF2P7BIUpIU?feature=shared)
+
+[![image](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/n82kc7ND2rDmhRmRexLrb.png)](https://youtu.be/JF2P7BIUpIU?feature=shared)
 
 ### About SDXL training
 
 The feature of SDXL training is now available in sdxl branch as an experimental feature. 
+
+Sep 3, 2023: The feature will be merged into the main branch soon. Following are the changes from the previous version. 
+
+- ControlNet-LLLite is added. See [documentation](./docs/train_lllite_README.md) for details.
+- JPEG XL is supported. [#786](https://github.com/kohya-ss/sd-scripts/pull/786) 
+- Peak memory usage is reduced. [#791](https://github.com/kohya-ss/sd-scripts/pull/791)
+- Input perturbation noise is added. See [#798](https://github.com/kohya-ss/sd-scripts/pull/798) for details.
+- Dataset subset now has `caption_prefix` and `caption_suffix` options. The strings are added to the beginning and the end of the captions before shuffling. You can specify the options in `.toml`.
+- Other minor changes.
+- Thanks for contributions from Isotr0py, vvern999, lansing  and others!
+
+Aug 13, 2023: 
+
+- LoRA-FA is added experimentally. Specify `--network_module networks.lora_fa` option instead of `--network_module networks.lora`. The trained model can be used as a normal LoRA model.
+
+Aug 12, 2023: 
+
+- The default value of noise offset when omitted has been changed to 0 from 0.0357.
+- The different learning rates for each U-Net block are now supported. Specify with `--block_lr` option. Specify 23 values separated by commas like `--block_lr 1e-3,1e-3 ... 1e-3`.
+  - 23 values correspond to `0: time/label embed, 1-9: input blocks 0-8, 10-12: mid blocks 0-2, 13-21: output blocks 0-8, 22: out`.
+
+Aug 6, 2023: 
+
+- [SAI Model Spec](https://github.com/Stability-AI/ModelSpec) metadata is now supported partially. `hash_sha256` is not supported yet.
+  - The main items are set automatically. 
+  - You can set title, author, description, license and tags with `--metadata_xxx` options in each training script.
+  - Merging scripts also support minimum SAI Model Spec metadata. See the help message for the usage.
+  - Metadata editor will be available soon.
+- SDXL LoRA has `sdxl_base_v1-0` now  for `ss_base_model_version` metadata item, instead of `v0-9`.
+
+Aug 4, 2023: 
+
+- `bitsandbytes` is now optional. Please install it if you want to use it. The insructions are in the later section.
+- `albumentations` is not required anymore.
+- An issue for pooled output for Textual Inversion training is fixed.
+- `--v_pred_like_loss ratio` option is added. This option adds the loss like v-prediction loss in SDXL training. `0.1` means that the loss is added 10% of the v-prediction loss. The default value is None (disabled).
+  - In v-prediction, the loss is higher in the early timesteps (near the noise). This option can be used to increase the loss in the early timesteps.
+- Arbitrary options can be used for Diffusers' schedulers. For example `--lr_scheduler_args "lr_end=1e-8"`.
+- `sdxl_gen_imgs.py` supports batch size > 1.
+- Fix ControlNet to work with attention couple and reginal LoRA in `gen_img_diffusers.py`.
 
 Summary of the feature:
 
@@ -115,12 +162,17 @@ Summary of the feature:
 #### Tips for SDXL training
 
 - The default resolution of SDXL is 1024x1024.
-- The fine-tuning can be done with 24GB GPU memory with the batch size of 1. For 24GB GPU, the following options are recommended:
+- The fine-tuning can be done with 24GB GPU memory with the batch size of 1. For 24GB GPU, the following options are recommended __for the fine-tuning with 24GB GPU memory__:
   - Train U-Net only.
   - Use gradient checkpointing.
   - Use `--cache_text_encoder_outputs` option and caching latents.
   - Use Adafactor optimizer. RMSprop 8bit or Adagrad 8bit may work. AdamW 8bit doesn't seem to work.
-- The LoRA training can be done with 12GB GPU memory.
+- The LoRA training can be done with 8GB GPU memory (10GB recommended). For reducing the GPU memory usage, the following options are recommended:
+  - Train U-Net only.
+  - Use gradient checkpointing.
+  - Use `--cache_text_encoder_outputs` option and caching latents.
+  - Use one of 8bit optimizers or Adafactor optimizer.
+  - Use lower dim (-8 for 8GB GPU).
 - `--network_train_unet_only` option is highly recommended for SDXL LoRA. Because SDXL has two text encoders, the result of the training will be unexpected.
 - PyTorch 2 seems to use slightly less GPU memory than PyTorch 1.
 - `--bucket_reso_steps` can be set to 32 instead of the default value 64. Smaller values than 32 will not work for SDXL training.
@@ -182,6 +234,8 @@ To set up the project, follow these steps:
    ```
    .\setup.bat
    ```
+
+   During the accelerate config step use the default values as proposed during the configuration unless you know your hardware demand otherwise. Tfe amount of VRAM on your GPU does not have an impact on the values used.
 
 #### Optional: CUDNN 8.6
 
@@ -375,6 +429,7 @@ To launch the GUI service, you can use the provided scripts or run the `kohya_gu
 --server_port: Define the port to run the server listener on.
 --inbrowser: Open the Gradio UI in a web browser.
 --share: Share the Gradio UI.
+--language: Set custom language
 ```
 
 ### Launching the GUI on Windows
@@ -478,8 +533,12 @@ If you come across a `FileNotFoundError`, it is likely due to an installation is
 
 ## Change History
 
-* 2023/07/18 (v21.8.3)
-  - Update to latest sd-scripts sdxl code base
-  - Fix typo: https://github.com/bmaltais/kohya_ss/issues/1205
-  - Add min and max resolution parameter for buckets
-  - Add colab notebook from https://github.com/camenduru/kohya_ss-colab
+* 2023/08/05 (v21.8.9)
+  - Update sd-script to caode as of Sept 3 2023
+    * ControlNet-LLLite is added. See documentation for details.
+    * JPEG XL is supported. #786
+    * Peak memory usage is reduced. #791
+    * Input perturbation noise is added. See #798 for details.
+    * Dataset subset now has caption_prefix and caption_suffix options. The strings are added to the beginning and the end of the captions before shuffling. You can specify the options in .toml.
+    * Other minor changes.
+  - Added support fir Chinese locallisation
